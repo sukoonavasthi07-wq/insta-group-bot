@@ -7,6 +7,17 @@ from flask import Flask, request, render_template_string, Response, redirect
 from instagrapi import Client
 
 # ==========================================
+# PATH FIX FOR RENDER & LOCAL
+# ==========================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SESSION_DIR = os.path.join(BASE_DIR, "sessions")
+SESSION_FILE = os.path.join(SESSION_DIR, "session.json")
+
+if not os.path.exists(SESSION_DIR):
+    os.makedirs(SESSION_DIR)
+
+# ==========================================
 # GLOBALS
 # ==========================================
 
@@ -16,14 +27,8 @@ STOP_EVENT = threading.Event()
 WORKER_THREAD = None
 CLIENT = None
 
-SESSION_DIR = "sessions"
-SESSION_FILE = f"{SESSION_DIR}/session.json"
-
-if not os.path.exists(SESSION_DIR):
-    os.makedirs(SESSION_DIR)
-
 # ==========================================
-# HTML TEMPLATE (Bootstrap 5)
+# HTML UI (Bootstrap)
 # ==========================================
 
 PAGE = """
@@ -64,7 +69,7 @@ PAGE = """
 
             <h5 class="fw-bold">Instagram Login</h5>
             <input name="username" class="form-control mt-2" placeholder="Instagram Username" required>
-            <input name="password" class="form-control mt-2" placeholder="Instagram Password" type="password" required>
+            <input name="password" class="form-control mt-2" type="password" placeholder="Instagram Password" required>
 
             <hr>
 
@@ -79,7 +84,7 @@ PAGE = """
             <hr>
 
             <h5 class="fw-bold">Group Thread IDs (one per line)</h5>
-            <textarea name="threads" class="form-control mt-2" placeholder="3402823668417...."></textarea>
+            <textarea name="threads" class="form-control mt-2" placeholder="3402823....."></textarea>
 
             <hr>
 
@@ -87,8 +92,8 @@ PAGE = """
             <input name="delay" class="form-control" placeholder="5">
 
             <h5 class="mt-3">Cyclone Delay Range</h5>
-            <input name="cyclone_min" class="form-control mt-2" placeholder="Min Random Delay (e.g. 3)">
-            <input name="cyclone_max" class="form-control mt-2" placeholder="Max Random Delay (e.g. 10)">
+            <input name="cyclone_min" class="form-control mt-2" placeholder="Min (e.g. 3)">
+            <input name="cyclone_max" class="form-control mt-2" placeholder="Max (e.g. 10)">
 
             <hr>
 
@@ -118,7 +123,7 @@ PAGE = """
 """
 
 # ==========================================
-# LOGGING HELPER
+# LOGGING
 # ==========================================
 
 def log(msg):
@@ -126,7 +131,7 @@ def log(msg):
     LOG_BUFFER.append(msg)
 
 # ==========================================
-# INSTAGRAM LOGIN + SESSION HANDLING
+# INSTAGRAM LOGIN + SESSION LOADING
 # ==========================================
 
 def get_client(username, password):
@@ -134,14 +139,14 @@ def get_client(username, password):
 
     cl = Client()
 
-    # LOAD session if exists
+    # Try load existing session
     if os.path.exists(SESSION_FILE):
         try:
             cl.load_settings(SESSION_FILE)
             cl.login(username, password)
-            log("Loaded session.json & logged in.")
-        except:
-            log("Session invalid. Logging in fresh.")
+            log("Loaded session.json & logged in successfully.")
+        except Exception as e:
+            log(f"Session invalid — logging in fresh. Reason: {e}")
             cl = Client()
             cl.login(username, password)
             cl.dump_settings(SESSION_FILE)
@@ -156,7 +161,7 @@ def get_client(username, password):
     return cl
 
 # ==========================================
-# WORKER THREAD: SENDS MESSAGES
+# WORKER THREAD
 # ==========================================
 
 def start_worker(username, password, threads, message, delay, min_cyc, max_cyc):
@@ -167,24 +172,23 @@ def start_worker(username, password, threads, message, delay, min_cyc, max_cyc):
 
     while not STOP_EVENT.is_set():
         for thread_id in threads:
+
             if STOP_EVENT.is_set():
                 break
 
             try:
                 client.direct_send(message, [], thread_ids=[thread_id])
-                log(f"Sent to {thread_id}")
+                log(f"Sent message to group: {thread_id}")
             except Exception as e:
                 log(f"Error sending to {thread_id}: {e}")
 
-            # base delay
             time.sleep(delay)
 
-            # cyclone random delay
             cyclone = random.randint(min_cyc, max_cyc)
             log(f"Cyclone delay: {cyclone}s")
             time.sleep(cyclone)
 
-    log("Bot stopped.")
+    log("Bot stopped by user request.")
 
 # ==========================================
 # ROUTES
@@ -196,11 +200,13 @@ def index():
 
     if request.method == "POST":
 
+        # STOP BOT
         if request.form.get("action") == "stop":
             STOP_EVENT.set()
             log("Stop requested by user.")
             return redirect("/")
 
+        # START BOT
         if request.form.get("action") == "start":
             username = request.form.get("username").strip()
             password = request.form.get("password").strip()
@@ -217,36 +223,36 @@ def index():
             min_c = int(request.form.get("cyclone_min") or 3)
             max_c = int(request.form.get("cyclone_max") or 10)
 
-            # start worker
             WORKER_THREAD = threading.Thread(
                 target=start_worker,
                 args=(username, password, threads, message, delay, min_c, max_c),
                 daemon=True
             )
+
             WORKER_THREAD.start()
             return redirect("/")
 
     return render_template_string(PAGE)
 
+
 # ==========================================
-# LIVE LOG STREAM
+# STREAM LOGS (SSE)
 # ==========================================
 
 @app.route("/logs")
 def stream_logs():
     def event_stream():
-        last_index = 0
+        last = 0
         while True:
-            if len(LOG_BUFFER) > last_index:
-                msg = LOG_BUFFER[last_index]
-                last_index += 1
-                yield f"data: {msg}\n\n"
+            if len(LOG_BUFFER) > last:
+                yield f"data: {LOG_BUFFER[last]}\n\n"
+                last += 1
             time.sleep(0.5)
 
     return Response(event_stream(), mimetype="text/event-stream")
 
 # ==========================================
-# RUN
+# RUN APP
 # ==========================================
 
 if __name__ == "__main__":
