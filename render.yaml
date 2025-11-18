@@ -1,12 +1,14 @@
 services:
-  - type: web
-    name: instagram-auto-sender
-    env: python
-    plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python app.py"
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.10"
-      - key: PORT
-        value: "10000"
+- type: web
+name: instagram-auto-sender
+env: python
+plan: free
+buildCommand: "pip install -r requirements.txt"
+startCommand: "python app.py"
+envVars:
+- key: PYTHON_VERSION
+value: "3.10"
+- key: PORT
+value: "10000"
+- key: SESSION_FILE
+value: "/tmp/session.json"
