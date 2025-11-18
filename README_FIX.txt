@@ -1,58 +1,48 @@
 INSTAGRAM GROUP MESSAGE BOT — AUTO SESSION VERSION
 ====================================================
 
-This bot logs into Instagram using a saved session.json
-so it NEVER asks for verification after the first login.
+Now includes a HOME PAGE (/) to fix the "Not Found" error on Render.
 
 ----------------------------------------------------
-HOW TO USE
+HOME PAGE
 ----------------------------------------------------
+Opening your Render URL will show:
 
-STEP 1 — Run the bot ONCE on your local computer:
-   python app.py
-
-STEP 2 — Login with your Instagram account.
-Instagram will ask for approval the FIRST TIME only.
-
-STEP 3 — Approve the login in Instagram app:
-   Security > Login Activity > "This Was Me"
-
-STEP 4 — session.json will be created automatically.
-
-STEP 5 — Upload session.json to GitHub along with:
-   app.py
-   requirements.txt
-   render.yaml
-   README_FIX.txt
-
-STEP 6 — Deploy to Render → Works automatically.
+Instagram Group Message Bot
+Status: Running
+Use POST /send to send messages.
 
 ----------------------------------------------------
-API USAGE
+API ROUTE
 ----------------------------------------------------
-
-POST https://your-render-url.onrender.com/send
+POST /send
 
 BODY (JSON):
 {
-  "username": "your_ig_username",
-  "password": "your_ig_password",
-  "message": "Hello!",
-  "group_id": "123456789",
+  "username": "...",
+  "password": "...",
+  "group_id": "...",
+  "message": "...",
   "delay": 2,
   "cyclone_delay": 5
 }
 
 ----------------------------------------------------
-FEATURES
+SESSION AUTO-LOGIN
 ----------------------------------------------------
+• First run locally → approve login in Instagram app
+• session.json gets created
+• Upload session.json to GitHub
+• Render auto-logs in with no challenge
 
-• Auto-login using saved session.json
-• No Instagram challenge after first approval
-• Supports group ID messaging
-• Delay + cyclone delay supported
-• Ready for Render deployment
-• Very stable for 24×7 automation
+----------------------------------------------------
+FILES
+----------------------------------------------------
+app.py
+render.yaml
+requirements.txt
+README_FIX.txt
+session.json (after first run)
 
 ----------------------------------------------------
 DONE!
