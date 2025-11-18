@@ -1,187 +1,129 @@
-==========================================================
- INSTAGRAM AUTO MESSAGE BOT – RENDER DEPLOYMENT GUIDE
-==========================================================
+# README_FIX.txt
 
-This project allows you to send automatic Instagram messages
-from a web UI hosted on Render. It supports:
+## Instagram Group Message Bot (Render + Flask + Instagrapi)
 
-✓ Multiple Instagram accounts (username + password)
-✓ Automatic session.json creation / loading
-✓ Sending messages to user IDs or group chat IDs
-✓ Delays between messages
-✓ Cyclone delays (big delay after a cycle)
-✓ Selectable message input OR upload .txt message file
-✓ Start Bot (Blue Button)
-✓ Stop Bot (Red Button)
-✓ 24/7 live logs on the same UI
-✓ Render deployment (start command = python app.py)
+### Fully Working: Login → Auto Session.json → Start/Stop Bot → Live Logs → Delays + Cyclone
 
-----------------------------------------------------------
- REQUIRED FILES
-----------------------------------------------------------
-1. app.py            → Full Flask bot UI + backend
-2. render.yaml       → Render service configuration
-3. requirements.txt  → Python dependencies
-4. README_FIX.txt    → (this file)
-5. /templates/index.html (auto-created by app.py)
-6. /sessions/        → Stores Instagram session.json files
-7. /logs/            → Stores 24/7 bot logs
+---
 
-----------------------------------------------------------
- HOW TO USE THE WEB UI
-----------------------------------------------------------
+## 1. LOGIN DETAILS (Required)
 
-➤ STEP 1 — Add Instagram Accounts
----------------------------------
-Inside the UI you will see:
+Enter your **Instagram Username** and **Instagram Password**.
 
-Instagram Accounts:
-----------------------------------------
-Username: (type here)
-Password: (type here)
-[Add Account] button
+* Automatically creates `/sessions/session.json`.
+* Reuses the same session every time.
+* Password is NOT saved to disk.
 
-You can add unlimited accounts.
-Each account will generate:
+---
 
-  sessions/<username>.json
+## 2. WRITE MESSAGE OR UPLOAD TXT
 
-This happens automatically.
+You may:
 
-----------------------------------------------------------
- STEP 2 — Write Message or Upload Message File (.txt)
-----------------------------------------------------------
+* Type a custom message manually, **or**
+* Upload a `.txt` file containing the message.
 
-You have two options:
+---
 
-1. Write your custom message in the message box
+## 3. CUSTOM NAME OR USERNAME (Optional)
 
-OR
+Write a custom name or Instagram username for identifying logs. (Not used for sending.)
 
-2. Upload a text (.txt) file containing your message
+---
 
-Only one will be used.
+## 4. GROUP CHAT IDs (Required)
 
-----------------------------------------------------------
- STEP 3 — Add Target Usernames or Group Chat IDs
-----------------------------------------------------------
-
-You can enter:
-
-✓ Instagram usernames  
-✓ Group chat IDs (numeric thread IDs)
-
+Add Instagram **Group Thread IDs**, one per line.
 Example:
 
-user1
-user2
-3498293849234   ← group thread id
+```
+340282366841710300949128173567xxxxxxx
+340282366841710300948232347567xxxxxxx
+```
 
-----------------------------------------------------------
- STEP 4 — Set Delays
-----------------------------------------------------------
+---
 
-Delay Between Messages (in seconds):
-------------------------------------
-Example: 8
+## 5. DELAYS BETWEEN MESSAGES
 
-Cyclone Delay (in seconds):
-------------------------------------
-Example: 120
+Add base delay (seconds), e.g.:
 
-Meaning:
-- Delay = normal delay between each send  
-- Cyclone delay = long delay after finishing all targets
+```
+8
+```
 
-----------------------------------------------------------
- STEP 5 — Start and Stop Buttons
-----------------------------------------------------------
+This delay is applied between each message.
 
-Two command buttons appear at the bottom:
+---
 
-[ BLUE  ]   Start Bot  
-[  RED  ]   Stop Bot  
+## 6. CYCLONE DELAYS (Randomized Delays)
 
-Once started, the bot runs in a background thread.
+Add random delay range:
 
-----------------------------------------------------------
- STEP 6 — Live Logs (24/7)
-----------------------------------------------------------
+```
+Min: 3
+Max: 12
+```
 
-At the bottom you will see:
+Bot uses `random(min, max)` before sends.
 
-----------------------------------------
-Live Logs:
-----------------------------------------
-[Every sent message / error printed here]
+---
 
-Logs update continuously while bot is running.
+## 7. START / STOP BOT
 
-----------------------------------------------------------
- DEPLOYMENT ON RENDER.COM
-----------------------------------------------------------
+### 🔵 START BOT
 
-1. Upload all project files to GitHub:
-   - app.py
-   - requirements.txt
-   - render.yaml
-   - README_FIX.txt
-   - templates folder
-   - logs folder
-   - sessions folder
+* Logs into Instagram
+* Loads/creates session.json
+* Begins messaging loop
+* Applies delays
+* Shows live logs
+* Runs 24/7 until stopped
 
-2. On Render:
-   - Create "New Web Service"
-   - Connect to your GitHub repo
+### 🔴 STOP BOT
 
-3. Render automatically reads render.yaml
+* Graceful shutdown
+* Halts message sending immediately
 
-4. Start Command:
-      python app.py
+---
 
-5. Bot will open on your render URL:
-      https://your-app.onrender.com
+## 8. LIVE LOGS
 
+Live logs include:
 
-----------------------------------------------------------
- AUTOMATIC SESSION.JSON HANDLING
-----------------------------------------------------------
+* Message sent status
+* Failures & retries
+* Cyclone delay usage
+* Session creation logs
+* Start/stop notifications
 
-The bot automatically:
+Logs stream in real time using SSE.
 
-✓ Creates sessions/<username>.json for each account  
-✓ Loads the session on next login  
-✓ Recreates automatically if corrupted  
+---
 
-No manual steps required.
+## 9. RUNNING THE BOT
 
-----------------------------------------------------------
- API USED
-----------------------------------------------------------
+Start the app:
 
-instagrapi – Fast & stable private API  
-Used for sending messages:
-- Direct message to username
-- Direct message to group thread id
+```
+python app.py
+```
 
-----------------------------------------------------------
- WARNINGS
-----------------------------------------------------------
+Deploy to Render using `render.yaml`. The web UI loads automatically.
 
-⚠ Do NOT spam too fast.
-⚠ Use cyclone delays to prevent Insta limits.
-⚠ Use multiple accounts to spread workload.
+---
 
-----------------------------------------------------------
- ABOUT
-----------------------------------------------------------
+## 10. FILES INCLUDED
 
-This UI was built using:
-- Flask (Python)
-- Instagrapi
-- HTML / AJAX
-- Render background threading system
+```
+app.py
+README_FIX.txt
+requirements.txt
+yaml (render.yaml)
+sessions/session.json (auto)
+```
 
-==========================================================
- END OF README_FIX.txt
-==========================================================
+---
+
+## 11. IMPORTANT NOTE
+
+If Instagram asks for 2FA or checkpoint, complete it manually on mobile. After that, the bot will continue using `session.json`.
