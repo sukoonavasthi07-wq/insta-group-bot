@@ -1,9 +1,10 @@
 services:
   - type: web
-    name: instagram-dm-sender
+    name: instagram-bot-ui
     env: python
     plan: free
-    region: oregon
-    branch: main
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k eventlet -w 1 app:app --bind 0.0.0.0:$PORT
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    autoDeploy: true
+    envVars:
+      PYTHON_VERSION: 3.10
