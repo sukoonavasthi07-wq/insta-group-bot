@@ -1,82 +1,47 @@
-# Instagram Group Message Sender Bot (Render Deployment)
+Instagram Group Message Sender Bot — Dark UI (Flask, Render)
 
-This bot allows you to log in using Instagram username + password and send
-messages to Instagram group IDs with normal and cyclone delays.
+Files:
+ - app.py
+ - render.yaml
+ - requirements.txt
+ - README_FIX.txt
 
-===========================================
-UI STRUCTURE (FOR FRONT-END DEVELOPERS)
-===========================================
+Quick start:
+1. Put these files in the root of a GitHub repo.
+2. Connect the repo to Render (New -> Web Service -> GitHub).
+3. Render will read render.yaml and run `pip install -r requirements.txt`.
+4. The app will be available at https://<your-render-service>.onrender.com
 
-1. LOGIN SECTION
-----------------
-• Username
-• Password
+Dashboard UI:
+ - GET /          -> dashboard (dark theme)
+ - POST /start    -> start the background bot (JSON payload)
+ - POST /stop     -> stop the background bot
+ - GET  /logs     -> live logs (SSE; used by UI)
+ - POST /send_once -> send a single message (username/password required)
 
-2. MESSAGE SENDER
------------------
-• Message input box
-• File upload (image/video/document)
-
-3. CUSTOM SENDER INFO
----------------------
-• Custom display name
-
-4. GROUP ID SECTION
--------------------
-• Input field for Instagram group ID
-
-5. DELAY CONTROLS
------------------
-• Normal delay (seconds)
-• Cyclone delay (seconds)
-
-6. BOT CONTROL
---------------
-• Start Bot (Blue Button)
-• Stop Bot (Red Button)
-
-7. LIVE LOGS (24×7)
--------------------
-Shows:
-• Sent messages
-• Timestamps
-• Errors
-• Delay countdown
-• Bot status
-
-===========================================
-API USAGE
-===========================================
-
-POST https://your-render-url.onrender.com/send
-
-JSON BODY:
+Start payload (JSON) for /start:
 {
   "username": "your_ig_username",
   "password": "your_ig_password",
-  "group_id": "123456789",
-  "message": "Hello!",
+  "group_ids": ["1234567890123456789", "9876543210987654321"],
+  "message": "Hello from the bot!",
+  "attachment_url": "https://example.com/image.jpg",  # optional
   "delay": 3,
-  "cyclone_delay": 8
+  "cyclone_delay": 8,
+  "custom_name": "MyBot"
 }
 
-===========================================
-FILE STRUCTURE
-===========================================
-/app.py
-/render.yaml
-/requirements.txt
-/README_FIX.txt
+Notes & warnings:
+ - Using username/password automation may trigger Instagram's security checks.
+ - Avoid spamming; Instagram can ban accounts for automated abuse.
+ - Test first with a throwaway account.
+ - Attachments are fetched by the server from a provided URL (not file upload).
+ - The bot uses a background thread; if the Render instance restarts the bot will stop and needs a manual start.
 
-===========================================
-DEPLOYING ON RENDER
-===========================================
+If you want:
+ - file upload support (multipart) instead of URL-based attachments
+ - persistent storage of credentials (NOT recommended)
+ - token-based login (if you have it)
+ - a React+build version for fancier UI
 
-1. Upload all files to GitHub.
-2. Create new Web Service on Render.
-3. Render reads render.yaml automatically.
-4. Deploy and use API.
-
-===========================================
-DONE!
-===========================================
+Use responsibly.
