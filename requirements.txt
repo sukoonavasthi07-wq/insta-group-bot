@@ -2,3 +2,5 @@ Flask==2.3.2
 instagrapi==1.16.26
 Werkzeug==2.3.7
 gunicorn==21.2.0
+Pillow>=8.1.1
+requests
