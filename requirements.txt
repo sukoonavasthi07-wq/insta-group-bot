@@ -1,3 +1,6 @@
-flask
+Flask
 instagrapi
+itsdangerous
+Werkzeug
+Jinja2
 requests
