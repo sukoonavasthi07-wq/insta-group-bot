@@ -1,36 +1,3 @@
 flask
 instagrapi
 requests
-
-
-
-
-# README_FIX.txt
-Instagram Bot Auto Sender with Delay, Cyclone Delay and Session Storage
-
-
-1. Login with username and password
-2. Send message to Instagram group ID
-3. Add message + attachment support structure
-4. Custom delay and cyclone delay fields
-5. Blue Start Bot, Red Stop Bot UI flow
-6. Live logs section
-7. session.json prevents login each time
-
-
-API Endpoint:
-POST /send
-{
-"username": "your_username",
-"password": "your_password",
-"group_id": "id_here",
-"message": "hello",
-"delay": 3,
-"cyclone_delay": 10
-}
-
-
-
-
-# session.json
-{}
