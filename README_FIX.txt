@@ -1,236 +1,187 @@
-===========================================================
-              INSTAGRAM AUTO DM BOT (RENDER UI)
-===========================================================
+==========================================================
+ INSTAGRAM AUTO MESSAGE BOT – RENDER DEPLOYMENT GUIDE
+==========================================================
 
-This project runs an automated Instagram DM Sender inside 
-a Flask web interface deployed on Render.
+This project allows you to send automatic Instagram messages
+from a web UI hosted on Render. It supports:
 
-Everything is controlled through the web page:
-✔ Multiple Instagram Accounts
-✔ Message Writing / Upload messages.txt file
-✔ Custom Name
-✔ Usernames & Group Chat IDs
-✔ Normal Delays
-✔ Cyclone Delays
-✔ Blue "Start Bot" Button
-✔ Red "Stop Bot" Button
-✔ Live Logs (Auto-refresh 24/7)
-✔ Automatic session.json generation
+✓ Multiple Instagram accounts (username + password)
+✓ Automatic session.json creation / loading
+✓ Sending messages to user IDs or group chat IDs
+✓ Delays between messages
+✓ Cyclone delays (big delay after a cycle)
+✓ Selectable message input OR upload .txt message file
+✓ Start Bot (Blue Button)
+✓ Stop Bot (Red Button)
+✓ 24/7 live logs on the same UI
+✓ Render deployment (start command = python app.py)
 
-The Render dashboard provides direct control over the bot.
+----------------------------------------------------------
+ REQUIRED FILES
+----------------------------------------------------------
+1. app.py            → Full Flask bot UI + backend
+2. render.yaml       → Render service configuration
+3. requirements.txt  → Python dependencies
+4. README_FIX.txt    → (this file)
+5. /templates/index.html (auto-created by app.py)
+6. /sessions/        → Stores Instagram session.json files
+7. /logs/            → Stores 24/7 bot logs
 
-===========================================================
-1) MULTIPLE INSTAGRAM ACCOUNTS
-===========================================================
+----------------------------------------------------------
+ HOW TO USE THE WEB UI
+----------------------------------------------------------
 
-Inside the web interface, you will see fields like:
+➤ STEP 1 — Add Instagram Accounts
+---------------------------------
+Inside the UI you will see:
 
--------------------------------------
-Account 1 Username:  ____________
-Account 1 Password:  ____________
+Instagram Accounts:
+----------------------------------------
+Username: (type here)
+Password: (type here)
+[Add Account] button
 
-Account 2 Username:  ____________
-Account 2 Password:  ____________
+You can add unlimited accounts.
+Each account will generate:
 
-Account 3 Username:  ____________
-Account 3 Password:  ____________
--------------------------------------
+  sessions/<username>.json
 
-You can add unlimited accounts in the UI.
+This happens automatically.
 
-The bot auto-switches when:
-• Rate-limited
-• Temporarily blocked
-• Challenge required
+----------------------------------------------------------
+ STEP 2 — Write Message or Upload Message File (.txt)
+----------------------------------------------------------
 
-===========================================================
-2) MESSAGE INPUT (TEXTBOX OR TXT UPLOAD)
-===========================================================
+You have two options:
 
-On the UI, you will have:
+1. Write your custom message in the message box
 
--------------------------------------
-[ Write Message Here ]
--------------------------------------
+OR
 
-Or you can upload:
--------------------------------------
-messages.txt
--------------------------------------
+2. Upload a text (.txt) file containing your message
 
-Format for messages.txt:
-Each line = one message
+Only one will be used.
+
+----------------------------------------------------------
+ STEP 3 — Add Target Usernames or Group Chat IDs
+----------------------------------------------------------
+
+You can enter:
+
+✓ Instagram usernames  
+✓ Group chat IDs (numeric thread IDs)
 
 Example:
-Hello!
-This is your IG automation bot.
-Hope you are having a good day.
 
-Bot automatically cycles messages.
+user1
+user2
+3498293849234   ← group thread id
 
-===========================================================
-3) CUSTOM NAME
-===========================================================
+----------------------------------------------------------
+ STEP 4 — Set Delays
+----------------------------------------------------------
 
-UI Field:
--------------------------------------
-Custom Name:  ____________
--------------------------------------
+Delay Between Messages (in seconds):
+------------------------------------
+Example: 8
 
-Used like:
-"Hello <CustomName>, how are you?"
-
-===========================================================
-4) TARGET USERS & GROUP CHAT IDs
-===========================================================
-
-Two sections in UI:
-
-A) For usernames:
--------------------------------------
-Target Usernames:
-user1,user2,user3
--------------------------------------
-
-B) For group chats:
--------------------------------------
-Group Chat IDs:
-1234567890,4455667788,9988771122
--------------------------------------
-
-The bot sends DMs to:
-✓ individual profiles  
-✓ group chat threads  
-
-===========================================================
-5) DELAYS BETWEEN MESSAGES (NORMAL DELAY)
-===========================================================
-
-UI Input Fields:
--------------------------------------
-Min Delay (seconds): ____
-Max Delay (seconds): ____
--------------------------------------
-
-Bot waits between these values.
-
-===========================================================
-6) CYCLONE DELAYS (ADVANCED CYCLIC DELAY)
-===========================================================
-
-UI Fields:
--------------------------------------
-Cyclone Pattern: 2,5,10,4
-Cyclone Jitter:  0.25
--------------------------------------
+Cyclone Delay (in seconds):
+------------------------------------
+Example: 120
 
 Meaning:
-Send → wait 2s  
-Send → wait 5s  
-Send → wait 10s  
-Send → wait 4s  
-Repeats forever.
+- Delay = normal delay between each send  
+- Cyclone delay = long delay after finishing all targets
 
-Jitter = ±25% randomization.
+----------------------------------------------------------
+ STEP 5 — Start and Stop Buttons
+----------------------------------------------------------
 
-===========================================================
-7) CONTROL BUTTONS (RENDER UI)
-===========================================================
+Two command buttons appear at the bottom:
 
-Two buttons appear directly inside the Flask web page:
+[ BLUE  ]   Start Bot  
+[  RED  ]   Stop Bot  
 
--------------------------------------
-[ 🔵 START BOT ]
-Starts sending messages 24/7
-Route: /start
+Once started, the bot runs in a background thread.
 
-[ 🔴 STOP BOT ]
-Stops the bot immediately
-Route: /stop
--------------------------------------
+----------------------------------------------------------
+ STEP 6 — Live Logs (24/7)
+----------------------------------------------------------
 
-Bot status displays below these buttons.
+At the bottom you will see:
 
-===========================================================
-8) LIVE LOGS (AUTOMATICALLY REFRESHING)
-===========================================================
+----------------------------------------
+Live Logs:
+----------------------------------------
+[Every sent message / error printed here]
 
-At bottom of the page you will see:
+Logs update continuously while bot is running.
 
--------------------------------------
-📌 Live Logs (auto-refresh every 2 seconds)
--------------------------------------
+----------------------------------------------------------
+ DEPLOYMENT ON RENDER.COM
+----------------------------------------------------------
 
-It displays:
+1. Upload all project files to GitHub:
+   - app.py
+   - requirements.txt
+   - render.yaml
+   - README_FIX.txt
+   - templates folder
+   - logs folder
+   - sessions folder
 
-• Current account  
-• Message sent  
-• User / Group ID  
-• Delay applied  
-• Errors & retries  
-• Account switching  
-• Session restore  
-• Login challenge and handling  
+2. On Render:
+   - Create "New Web Service"
+   - Connect to your GitHub repo
 
-Logs also write to:
--------------------------------------
-logs/live.log
--------------------------------------
+3. Render automatically reads render.yaml
 
-===========================================================
-9) AUTO SESSION MANAGEMENT
-===========================================================
+4. Start Command:
+      python app.py
 
-Bot automatically creates and updates:
--------------------------------------
-session.json
--------------------------------------
+5. Bot will open on your render URL:
+      https://your-app.onrender.com
 
-This file stores:
-• Cookies  
-• Login tokens  
-• Device ID  
 
-Purpose:
-✓ Prevents login every time  
-✓ Avoids checkpoints  
-✓ Reduces risk of blocking  
+----------------------------------------------------------
+ AUTOMATIC SESSION.JSON HANDLING
+----------------------------------------------------------
 
-===========================================================
-10) HOW TO DEPLOY ON RENDER
-===========================================================
+The bot automatically:
 
-1. Upload files:
-- app.py
-- render.yaml
-- requirements.txt
-- README_FIX.txt
+✓ Creates sessions/<username>.json for each account  
+✓ Loads the session on next login  
+✓ Recreates automatically if corrupted  
 
-2. Push to GitHub
+No manual steps required.
 
-3. Connect repository to Render
+----------------------------------------------------------
+ API USED
+----------------------------------------------------------
 
-4. Render automatically deploys Flask app
+instagrapi – Fast & stable private API  
+Used for sending messages:
+- Direct message to username
+- Direct message to group thread id
 
-5. Open "Public URL"
+----------------------------------------------------------
+ WARNINGS
+----------------------------------------------------------
 
-You will see:
-✓ Inputs  
-✓ Buttons  
-✓ Logs  
-✓ Controls  
+⚠ Do NOT spam too fast.
+⚠ Use cyclone delays to prevent Insta limits.
+⚠ Use multiple accounts to spread workload.
 
-Bot runs fully online 24/7.
+----------------------------------------------------------
+ ABOUT
+----------------------------------------------------------
 
-===========================================================
-11) SAFETY NOTES
-===========================================================
+This UI was built using:
+- Flask (Python)
+- Instagrapi
+- HTML / AJAX
+- Render background threading system
 
-• Do not abuse message sending  
-• Avoid spamming  
-• Use multiple accounts wisely  
-• Respect Instagram limits  
-
-===========================================================
-END OF README
-===========================================================
+==========================================================
+ END OF README_FIX.txt
+==========================================================
