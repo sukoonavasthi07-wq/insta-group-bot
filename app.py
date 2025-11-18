@@ -36,6 +36,19 @@ def login_to_instagram(username, password):
 
 
 # ---------------------------
+# Home Page Route - FIX "Not Found"
+# ---------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return """
+    <h1>Instagram Group Message Bot</h1>
+    <p>Status: Running Successfully on Render 🚀</p>
+    <p>Use <b>POST /send</b> to send messages.</p>
+    <p>This is a backend API. UI is not included.</p>
+    """
+
+
+# ---------------------------
 # Send message to group ID
 # ---------------------------
 def send_message_with_delays(cl, group_id, message, delay, cyclone_delay):
