@@ -1,4 +1,4 @@
-# render.yaml - example
+# render.yaml - example for Render
 services:
   - type: web
     name: instagram-dm-sender
