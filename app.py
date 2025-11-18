@@ -1,23 +1,15 @@
 # app.py
 """
-Instagram DM Bot - Flask backend
+Instagram DM Sender - Flask backend using instagrapi
+Implements:
+  POST /send   -> start job (JSON config)
+  POST /stop   -> stop job
+  GET  /status -> status json
+  GET  /logs   -> logs (plain text)
 
-Endpoints:
-- POST /send    : start sending messages (accepts JSON config). If no JSON provided,
-                  falls back to environment variables (single-account).
-- POST /stop    : stop the running job.
-- GET  /status  : return current status info.
-- GET  /logs    : return recent logs (plain text).
-- GET  /        : small landing page.
-
-Behavior:
-- Supports multiple accounts (accounts -> session files stored under ./sessions/)
-- Auto-creates/loads session.json per account
-- Cyclone delays (pattern + jitter) and simple min/max delay support
-- Exponential backoff on send failures
-- Live logs stored to logs/live.log and in-memory (last N lines)
+Session files: stored under ./sessions/<username>_session.json (auto-created)
+Logs: ./logs/live.log (appends). Recent logs also kept in-memory for quick UI reads.
 """
-
 import os
 import time
 import json
@@ -29,67 +21,54 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
-from flask import Flask, jsonify, request, send_file, abort
+from flask import Flask, request, jsonify, send_file, abort, Response
 
-# third-party
 try:
     from instagrapi import Client
 except Exception as e:
-    raise RuntimeError("Missing dependency 'instagrapi'. Install requirements.") from e
+    raise RuntimeError("Please install 'instagrapi' (see requirements.txt).") from e
 
-# -----------------------
-# Directories / Files
-# -----------------------
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
-SESSION_DIR = BASE_DIR / "sessions"
+# -------------------------
+# Paths & globals
+# -------------------------
+BASE = Path(__file__).resolve().parent
+LOG_DIR = BASE / "logs"
+SESSION_DIR = BASE / "sessions"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
 LOG_FILE = LOG_DIR / "live.log"
 
-# -----------------------
-# App & Globals
-# -----------------------
 app = Flask(__name__)
-run_lock = Lock()
-runner = None  # will hold BotRunner instance
+THREAD_LOCK = Lock()
 
-# Keep in-memory logs for quick UI access
-MAX_IN_MEMORY_LOGS = 2000
-in_memory_logs = deque([], maxlen=MAX_IN_MEMORY_LOGS)
+# in-memory logs
+MAX_IN_MEMORY = 2000
+INMEM = deque(maxlen=MAX_IN_MEMORY)
 
-
-# -----------------------
-# Logging helpers
-# -----------------------
-def append_log(line: str, to_console: bool = True):
+def append_log(line: str):
     t = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    final = f"[{t} UTC] {line}"
-    in_memory_logs.append(final)
+    full = f"[{t} UTC] {line}"
+    INMEM.append(full)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(final + "\n")
+            f.write(full + "\n")
     except Exception:
-        # don't crash logging
         pass
-    if to_console:
-        print(final)
+    print(full)
 
-
-# -----------------------
-# Bot Runner
-# -----------------------
+# -------------------------
+# BotRunner
+# -------------------------
 class BotRunner:
     def __init__(self):
         self._thread = None
-        self._stop_event = Event()
+        self._stop = Event()
         self._running = False
         self._status_lock = Lock()
         self._status = {
             "status": "idle",
             "time": None,
-            "summary": "Not started",
+            "summary": "not started",
             "current_account": None,
             "sent_count": 0,
             "failed_count": 0,
@@ -100,119 +79,78 @@ class BotRunner:
         with self._status_lock:
             return dict(self._status)
 
-    def start(self, config: Dict[str, Any], single_run: bool = False):
-        with run_lock:
-            if self._running:
-                append_log("Start requested but runner already running.")
-                return {"ok": False, "reason": "already_running"}
-            self._stop_event.clear()
-            self._running = True
-            self._config = config
-            self._status.update({
-                "status": "running",
-                "time": datetime.utcnow().isoformat() + "Z",
-                "summary": "Started",
-                "sent_count": 0,
-                "failed_count": 0,
-            })
-            self._thread = Thread(target=self._run_main, args=(config, single_run), daemon=True)
-            self._thread.start()
-            append_log("BotRunner started.")
-            return {"ok": True, "message": "started"}
-
-    def stop(self):
-        append_log("Stop requested.")
-        self._stop_event.set()
-        self._status.update({"status": "stopping"})
-        # join thread with small timeout (non-blocking)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
-        self._running = False
-        self._status.update({"status": "stopped", "summary": "Stopped by user"})
-        append_log("BotRunner stopped.")
-        return {"ok": True}
-
     def _set_status(self, **kwargs):
         with self._status_lock:
             self._status.update(kwargs)
 
-    # -----------------------
-    # Session helpers
-    # -----------------------
-    def _session_file_for(self, username: str) -> str:
+    def start(self, config: Dict[str, Any], single_run: bool = False):
+        with THREAD_LOCK:
+            if self._running:
+                append_log("Start requested but already running.")
+                return {"ok": False, "reason": "already_running"}
+            self._stop.clear()
+            self._running = True
+            self._config = config
+            self._set_status(status="running", time=datetime.utcnow().isoformat() + "Z",
+                             summary="started", sent_count=0, failed_count=0)
+            self._thread = Thread(target=self._run, args=(config, single_run), daemon=True)
+            self._thread.start()
+            append_log("Runner started.")
+            return {"ok": True, "message": "started"}
+
+    def stop(self):
+        append_log("Stop requested.")
+        self._stop.set()
+        self._set_status(status="stopping")
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+        self._running = False
+        self._set_status(status="stopped", summary="stopped by user")
+        append_log("Runner stopped.")
+        return {"ok": True}
+
+    def _session_file(self, username: str) -> str:
         safe = username.replace("@", "").replace(" ", "_")
         return str(SESSION_DIR / f"{safe}_session.json")
 
-    def _ensure_client_for(self, account: Dict[str, str]) -> Client:
-        """
-        Ensures a logged-in Client for a given account.
-        account: {"username": "...", "password": "..."}
-        Returns an instagrapi.Client
-        """
-        username = account.get("username")
-        password = account.get("password", "")
-        if not username:
-            raise ValueError("Account missing username")
-
+    def _ensure_client(self, username: str, password: str) -> Client:
         append_log(f"Preparing client for {username}")
         client = Client()
-        session_file = self._session_file_for(username)
+        sess = self._session_file(username)
         try:
-            if os.path.exists(session_file):
+            if os.path.exists(sess):
                 try:
-                    client.load_settings(session_file)
-                    # attempt to re-login / verify session — instagrapi will use stored cookies
-                    client.login(username, password)
-                    client.dump_settings(session_file)
-                    append_log(f"Loaded existing session for {username}")
+                    client.load_settings(sess)
+                    client.login(username, password)  # instagrapi will use settings and cookies if valid
+                    client.dump_settings(sess)
+                    append_log(f"Reused session for {username}")
                     return client
                 except Exception:
-                    append_log(f"Could not reuse session for {username}. Will attempt fresh login.")
+                    append_log(f"Could not reuse session for {username}; will attempt fresh login.")
             # fresh login
             client = Client()
-            append_log(f"Logging in {username} (fresh)")
             client.login(username, password)
-            client.dump_settings(session_file)
+            client.dump_settings(sess)
             append_log(f"Logged in and saved session for {username}")
             return client
         except Exception as e:
             append_log(f"Login failed for {username}: {e}")
             raise
 
-    # -----------------------
-    # Delay / backoff helpers
-    # -----------------------
-    def _cyclone_delay(self, pattern: List[float], jitter: float, index: int, min_delay: float, max_delay: float) -> float:
+    def _cyclone(self, pattern: List[float], jitter: float, index: int, min_d: float, max_d: float) -> float:
         if pattern:
             base = float(pattern[index % len(pattern)])
         else:
-            base = random.uniform(min_delay or 1.0, max_delay or 4.0)
+            base = random.uniform(min_d or 1.0, max_d or 4.0)
         j = (jitter or 0.0) * base
-        delay = base + random.uniform(-j, j)
-        return max(0.2, float(delay))
+        return max(0.2, base + random.uniform(-j, j))
 
-    def _exponential_backoff(self, attempt: int, base_backoff: float = 2.0) -> float:
-        backoff = base_backoff * (2 ** (attempt - 1))
-        backoff += random.uniform(0, backoff * 0.25)
-        return backoff
+    def _backoff(self, attempt: int, base_backoff: float = 2.0) -> float:
+        b = base_backoff * (2 ** (attempt - 1))
+        b += random.uniform(0, b * 0.25)
+        return b
 
-    # -----------------------
-    # Core sending loop
-    # -----------------------
-    def _run_main(self, config: Dict[str, Any], single_run: bool):
-        """
-        config keys (all optional; validated/coerced before calling):
-        - accounts: list of {"username":str, "password":str}
-        - messages: list[str]
-        - recipients: list[str]
-        - custom_name: str
-        - min_delay, max_delay: float
-        - cyclone_pattern: list[float]
-        - cyclone_jitter: float
-        - max_retries: int
-        - base_backoff: float
-        - send_to_groups: bool (groups provided in recipients)
-        """
+    def _run(self, config: Dict[str, Any], single_run: bool):
         try:
             accounts: List[Dict[str, str]] = config.get("accounts") or []
             messages: List[str] = config.get("messages") or []
@@ -226,143 +164,131 @@ class BotRunner:
             base_backoff = float(config.get("base_backoff") or 2.0)
 
             if not messages:
-                append_log("No messages to send; aborting run.")
+                append_log("No messages provided; aborting.")
                 self._set_status(status="idle", summary="no_messages")
                 self._running = False
                 return
-
             if not recipients:
-                append_log("No recipients provided; aborting run.")
+                append_log("No recipients provided; aborting.")
                 self._set_status(status="idle", summary="no_recipients")
                 self._running = False
                 return
 
-            # Prepare clients for all accounts (lazy login on demand)
-            clients_map = {}  # username -> Client
-            account_index = 0
-            msg_index = 0
-            sent_count = 0
-            failed_count = 0
+            clients = {}
+            r_index = 0
+            m_index = 0
+            sent = 0
+            failed = 0
 
-            append_log(f"Begin sending loop. single_run={single_run}. Recipients={len(recipients)} Accounts={len(accounts)}")
+            append_log(f"Starting sending loop. recipients={len(recipients)} accounts={len(accounts)} single_run={single_run}")
 
-            while not self._stop_event.is_set():
-                # Stop after one full pass if single_run true
-                if single_run and account_index >= len(recipients):
+            # If no accounts provided, fallback to env vars if present
+            if not accounts:
+                env_user = os.getenv("INSTAGRAM_USERNAME")
+                env_pass = os.getenv("INSTAGRAM_PASSWORD")
+                if env_user and env_pass:
+                    accounts = [{"username": env_user, "password": env_pass}]
+                else:
+                    append_log("No accounts configured and no ENV fallback. Aborting.")
+                    self._set_status(status="idle", summary="no_account")
+                    self._running = False
+                    return
+
+            total_to_send = len(recipients) if single_run else None
+
+            while not self._stop.is_set():
+                if single_run and r_index >= len(recipients):
                     append_log("Single-run completed.")
                     break
 
-                # pick next recipient
-                recipient = recipients[account_index % len(recipients)]
-                message = messages[msg_index % len(messages)]
-                msg_index += 1
+                recipient = recipients[r_index % len(recipients)]
+                message = messages[m_index % len(messages)]
+                m_index += 1
 
-                # allow template replacement for custom_name and placeholder {name}
                 if custom_name:
                     message = message.replace("{name}", custom_name)
 
-                # choose account in round-robin
-                if accounts:
-                    account = accounts[account_index % len(accounts)]
-                else:
-                    # fallback to ENV single-account
-                    env_user = os.getenv("INSTAGRAM_USERNAME")
-                    env_pass = os.getenv("INSTAGRAM_PASSWORD")
-                    if not (env_user and env_pass):
-                        append_log("No account configured (and no INSTAGRAM_USERNAME/INSTAGRAM_PASSWORD env). Aborting.")
-                        self._set_status(status="idle", summary="no_account")
-                        break
-                    account = {"username": env_user, "password": env_pass}
+                # pick account round-robin
+                account = accounts[r_index % len(accounts)]
+                uname = account.get("username")
+                upass = account.get("password", "")
+                self._set_status(current_account=uname)
 
-                account_username = account.get("username")
-                self._set_status(current_account=account_username)
-                # prepare client if not already
-                if account_username not in clients_map:
+                if uname not in clients:
                     try:
-                        clients_map[account_username] = self._ensure_client_for(account)
+                        clients[uname] = self._ensure_client(uname, upass)
                     except Exception as e:
-                        append_log(f"Skipping account {account_username} due to login error: {e}")
-                        failed_count += 1
-                        account_index += 1
-                        # move to next recipient/account
+                        append_log(f"Skipping account {uname} due to login error: {e}")
+                        failed += 1
+                        r_index += 1
                         time.sleep(1.0)
                         continue
 
-                client = clients_map[account_username]
+                client = clients[uname]
 
-                # Resolve and send with retries
                 success = False
                 attempt = 0
-                while attempt < max_retries and not success and not self._stop_event.is_set():
+                while attempt < max_retries and not success and not self._stop.is_set():
                     attempt += 1
                     try:
-                        # Determine if recipient looks like a group id (all digits) or username
                         if recipient.isdigit():
-                            # group thread id - instagrapi expects thread_id for group messages
-                            thread_id = int(recipient)
-                            # instagrapi direct_send can accept thread_id via client.direct_send(message, thread_ids=[thread_id])
-                            # but API varies; we attempt direct_send to thread
-                            client.direct_send(message, thread_ids=[thread_id])
+                            # treat as group thread id
+                            client.direct_send(message, thread_ids=[int(recipient)])
                         else:
-                            # username -> convert to user_id
-                            to_user_id = client.user_id_from_username(recipient)
-                            client.direct_send(message, [to_user_id])
-
-                        append_log(f"Sent to {recipient} using {account_username} (attempt {attempt})")
-                        sent_count += 1
+                            uid = client.user_id_from_username(recipient)
+                            client.direct_send(message, [uid])
+                        append_log(f"Sent to {recipient} via {uname} (attempt {attempt})")
+                        sent += 1
                         success = True
                     except Exception as e:
                         append_log(f"Send attempt {attempt} to {recipient} failed: {e}")
-                        # If maxed out, mark failure
                         if attempt >= max_retries:
-                            append_log(f"Max retries reached for {recipient}; moving on.")
-                            failed_count += 1
+                            append_log(f"Failed to send to {recipient} after {attempt} attempts.")
+                            failed += 1
                             break
-                        backoff = self._exponential_backoff(attempt, base_backoff)
-                        append_log(f"Retrying after backoff {backoff:.1f}s")
-                        time.sleep(backoff)
+                        back = self._backoff(attempt, base_backoff)
+                        append_log(f"Retrying after backoff {back:.1f}s")
+                        time.sleep(back)
 
-                # persist session for account after sending (best-effort)
+                # save session best-effort
                 try:
-                    session_file = self._session_file_for(account_username)
+                    session_file = self._session_file(uname)
                     client.dump_settings(session_file)
                 except Exception:
                     pass
 
-                self._set_status(sent_count=sent_count, failed_count=failed_count)
+                self._set_status(sent_count=sent, failed_count=failed)
 
-                # Delay before next send
-                delay = self._cyclone_delay(cyclone_pattern, cyclone_jitter, msg_index, min_delay, max_delay)
-                append_log(f"Delay {delay:.2f}s before next send.")
-                # sleep but responsive to stop
+                # delay
+                delay = self._cyclone(cyclone_pattern, cyclone_jitter, m_index, min_delay, max_delay)
+                append_log(f"Sleeping {delay:.2f}s")
                 slept = 0.0
                 step = 0.5
-                while slept < delay and not self._stop_event.is_set():
+                while slept < delay and not self._stop.is_set():
                     time.sleep(min(step, delay - slept))
                     slept += step
 
-                account_index += 1
-
-                # break condition for single_run: perform only len(recipients) sends
-                if single_run and account_index >= len(recipients):
+                r_index += 1
+                if single_run and total_to_send and r_index >= total_to_send:
                     append_log("Single-run finished required sends.")
                     break
 
-            # End of sending loop
-            append_log(f"Sending loop finished. sent={sent_count}, failed={failed_count}")
-            self._set_status(status="idle", summary=f"sent {sent_count}, failed {failed_count}", sent_count=sent_count,
-                             failed_count=failed_count, time=datetime.utcnow().isoformat() + "Z")
+            append_log(f"Run finished: sent={sent} failed={failed}")
+            self._set_status(status="idle", summary=f"sent {sent}, failed {failed}", time=datetime.utcnow().isoformat() + "Z",
+                             sent_count=sent, failed_count=failed)
             self._running = False
         except Exception as e:
-            append_log("Unhandled error in runner: " + str(e))
+            append_log("Runner error: " + str(e))
             append_log(traceback.format_exc())
             self._set_status(status="failed", summary=str(e))
             self._running = False
 
+# global runner
+RUNNER = BotRunner()
 
-# -----------------------
-# Flask endpoints
-# -----------------------
+# -------------------------
+# Routes
+# -------------------------
 @app.route("/", methods=["GET"])
 def index():
     return (
@@ -373,177 +299,116 @@ def index():
         "GET  /logs   -> logs (plain text)\n</pre>"
     )
 
-
 @app.route("/send", methods=["POST"])
-def send_endpoint():
+def send_route():
     """
-    Accepts JSON config or uses env vars.
-    JSON keys:
-      accounts: [{username, password}, ...]
-      messages: [str, ...]
-      recipients: [str, ...]  (usernames or numeric group ids)
-      custom_name: str
-      min_delay, max_delay: floats
-      cyclone_pattern: [float,...]
-      cyclone_jitter: float
-      max_retries: int
-      base_backoff: float
-      singleRun: bool  (optional)
-      testOnly: bool  (optional) - do login checks and return result without sending
+    JSON payload expected (example):
+    {
+      "accounts": [{"username":"u","password":"p"}, ...],
+      "messages": ["Hi {name}", "Another message"],
+      "recipients": ["target1","123456789012345"],
+      "custom_name": "Alex",
+      "min_delay": 3,
+      "max_delay": 6,
+      "cyclone_pattern": [2,5,10],
+      "cyclone_jitter": 0.25,
+      "max_retries": 4,
+      "base_backoff": 2.0,
+      "singleRun": true
+    }
     """
-    global runner
     payload = {}
     try:
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = request.get_json(force=True)
     except Exception:
         payload = {}
 
-    # allow form data fallback
-    if not payload and request.form:
-        payload = request.form.to_dict(flat=True)
-
-    # normalize simple fields
-    single_run = bool(payload.get("singleRun") or payload.get("single_run") or payload.get("singleRun") is True)
-    test_only = bool(payload.get("testOnly") or payload.get("test_only"))
-
-    # Build config with validation/coercion
-    config = {}
-
-    # Accounts
-    accounts = payload.get("accounts")
-    if not accounts:
-        # fallback to env single-account
-        env_user = os.getenv("INSTAGRAM_USERNAME")
-        env_pass = os.getenv("INSTAGRAM_PASSWORD")
-        if env_user and env_pass:
-            accounts = [{"username": env_user, "password": env_pass}]
-    if accounts:
-        validated = []
-        for a in accounts:
-            if isinstance(a, dict):
-                if a.get("username"):
-                    validated.append({"username": a.get("username"), "password": a.get("password", "")})
-            else:
-                # try parse "user:pass" strings
-                s = str(a)
-                if ":" in s:
-                    u, p = s.split(":", 1)
-                    validated.append({"username": u.strip(), "password": p.strip()})
-        config["accounts"] = validated
-
-    # Messages
-    messages = payload.get("messages")
-    if isinstance(messages, str):
-        # newline separated
-        messages = [m.strip() for m in messages.splitlines() if m.strip()]
-    if not messages:
-        # maybe messages_text or messagesFile content
-        if payload.get("messages_text"):
-            messages = [m.strip() for m in str(payload.get("messages_text")).splitlines() if m.strip()]
-    if messages:
-        config["messages"] = messages
-
-    # Recipients
-    recipients = payload.get("recipients") or payload.get("to") or payload.get("targets")
-    if isinstance(recipients, str):
-        recipients = [r.strip() for r in recipients.split(",") if r.strip()]
-    if recipients:
-        config["recipients"] = recipients
-
-    # Other params
-    def _float_or_none(k):
-        v = payload.get(k)
+    # basic validation & normalization
+    def as_list(v):
         if v is None:
-            return None
-        try:
-            return float(v)
-        except Exception:
-            return None
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return list(v)
 
-    config["custom_name"] = payload.get("custom_name") or payload.get("customName") or ""
-    config["min_delay"] = _float_or_none("min_delay") or _float_or_none("minDelay") or payload.get("min_delay") or payload.get("minDelay")
-    config["max_delay"] = _float_or_none("max_delay") or _float_or_none("maxDelay") or payload.get("max_delay") or payload.get("maxDelay")
-    # cyclone pattern may be list or comma string
+    cfg = {}
+    cfg["accounts"] = payload.get("accounts") or []
+    # also support "accounts" as ["user:pass", ...]
+    parsed_accounts = []
+    for a in cfg["accounts"]:
+        if isinstance(a, dict) and a.get("username"):
+            parsed_accounts.append({"username": a.get("username"), "password": a.get("password", "")})
+        elif isinstance(a, str) and ":" in a:
+            u, p = a.split(":", 1)
+            parsed_accounts.append({"username": u.strip(), "password": p.strip()})
+    cfg["accounts"] = parsed_accounts
+
+    messages = payload.get("messages") or payload.get("messages_text")
+    if isinstance(messages, str):
+        cfg["messages"] = [m.strip() for m in messages.splitlines() if m.strip()]
+    else:
+        cfg["messages"] = as_list(messages)
+
+    recipients = payload.get("recipients") or payload.get("to")
+    if isinstance(recipients, str):
+        cfg["recipients"] = [r.strip() for r in recipients.split(",") if r.strip()]
+    else:
+        cfg["recipients"] = as_list(recipients)
+
+    cfg["custom_name"] = payload.get("custom_name") or payload.get("customName") or ""
+    cfg["min_delay"] = payload.get("min_delay") or payload.get("minDelay") or 1.5
+    cfg["max_delay"] = payload.get("max_delay") or payload.get("maxDelay") or 4.0
+    # cyclone pattern may be array or comma string
     cp = payload.get("cyclone_pattern") or payload.get("cyclonePattern") or payload.get("cyclone_pattern")
     if isinstance(cp, str):
         try:
-            config["cyclone_pattern"] = [float(x.strip()) for x in cp.split(",") if x.strip()]
+            cfg["cyclone_pattern"] = [float(x.strip()) for x in cp.split(",") if x.strip()]
         except Exception:
-            config["cyclone_pattern"] = []
+            cfg["cyclone_pattern"] = []
     else:
-        config["cyclone_pattern"] = cp or []
-    config["cyclone_jitter"] = _float_or_none("cyclone_jitter") or _float_or_none("cycloneJitter") or 0.0
-    config["max_retries"] = int(payload.get("max_retries") or payload.get("maxRetries") or 3)
-    config["base_backoff"] = _float_or_none("base_backoff") or 2.0
+        cfg["cyclone_pattern"] = cp or []
+    cfg["cyclone_jitter"] = payload.get("cyclone_jitter") or payload.get("cycloneJitter") or 0.0
+    cfg["max_retries"] = int(payload.get("max_retries") or payload.get("maxRetries") or 3)
+    cfg["base_backoff"] = float(payload.get("base_backoff") or payload.get("baseBackoff") or 2.0)
+    single_run = bool(payload.get("singleRun") or payload.get("single_run"))
 
-    # Basic tests
-    if not config.get("messages"):
-        return jsonify({"ok": False, "reason": "no_messages", "message": "Provide messages array or messages_text"}), 400
-    if not config.get("recipients"):
-        return jsonify({"ok": False, "reason": "no_recipients", "message": "Provide recipients list"}), 400
+    # if missing messages/recipients return error
+    if not cfg.get("messages"):
+        return jsonify({"ok": False, "reason": "no_messages"}), 400
+    if not cfg.get("recipients"):
+        return jsonify({"ok": False, "reason": "no_recipients"}), 400
 
-    # If testOnly requested, try login on each account and return result
-    if test_only:
-        results = []
-        for a in config.get("accounts", []):
-            try:
-                c = Client()
-                append_log(f"Test login: attempting {a.get('username')}")
-                c.login(a.get("username"), a.get("password"))
-                # don't save real session during test
-                results.append({"username": a.get("username"), "ok": True})
-            except Exception as e:
-                results.append({"username": a.get("username"), "ok": False, "error": str(e)})
-        return jsonify({"ok": True, "test_results": results})
-
-    # Start runner
-    global runner
-    if runner is None:
-        runner = BotRunner()
-
-    res = runner.start(config=config, single_run=single_run)
+    # if no accounts provided, runner will attempt env fallback (INSTAGRAM_USERNAME/INSTAGRAM_PASSWORD)
+    res = RUNNER.start(cfg, single_run=single_run)
     return jsonify(res)
 
-
 @app.route("/stop", methods=["POST"])
-def stop_endpoint():
-    global runner
-    if runner is None:
-        return jsonify({"ok": False, "reason": "not_running"})
-    return jsonify(runner.stop())
-
+def stop_route():
+    return jsonify(RUNNER.stop())
 
 @app.route("/status", methods=["GET"])
-def status_endpoint():
-    global runner
-    if runner is None:
-        return jsonify({"status": "idle", "summary": "not_started", "time": None})
-    return jsonify(runner.status())
-
+def status_route():
+    return jsonify(RUNNER.status())
 
 @app.route("/logs", methods=["GET"])
-def logs_endpoint():
-    """
-    Return logs from in-memory buffer (most recent lines) or full file when ?full=1
-    """
+def logs_route():
     full = request.args.get("full", "0") in ("1", "true", "yes")
     if full:
         try:
             return send_file(str(LOG_FILE), mimetype="text/plain", as_attachment=False, download_name="live.log")
         except Exception:
             abort(404)
-    # else return last N lines as plain text
-    text = "\n".join(list(in_memory_logs)[-MAX_IN_MEMORY_LOGS:])
-    return text, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    text = "\n".join(list(INMEM)[-MAX_IN_MEMORY:])
+    return Response(text, mimetype="text/plain; charset=utf-8")
 
-
-# -----------------------
-# Run server
-# -----------------------
+# -------------------------
+# Run app
+# -------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    append_log("Starting Instagram DM Bot server")
-    # create empty log file if missing
     if not LOG_FILE.exists():
         LOG_FILE.write_text("")
+    append_log("Starting Instagram DM Sender API (instagrapi)")
+    port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
