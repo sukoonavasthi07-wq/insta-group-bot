@@ -1,163 +1,85 @@
-# Instagram Group Message Bot (Render Deployment)
+# Instagram Group Message Sender — README
 
-This project lets you send automated Instagram group messages using a Flask backend + Instagrapi bot + web UI. Designed to run on **Render** with GitHub deployment.
-
----
-
-## 📌 FEATURES
-
-* Login using **Instagram username + password**
-* Automatically load and save **session.json** for login approval bypass
-* Send message to multiple group IDs
-* Delay between messages + cyclone delay
-* Live logs (real‑time)
-* Start Bot / Stop Bot buttons
-* Manual "Send Once" option
-* Uses SSE (Server‑Sent Events) for stable logging on Render
+This repo contains a Flask-based Instagram messaging bot that can send messages to group IDs with configurable delays and a cyclone delay. It supports session saving (`session.json`) to avoid repeated logins.
 
 ---
 
-## 📁 PROJECT STRUCTURE
+## Files
 
-```
-app.py
-requirements.txt
-render.yaml
-README_FIX.txt
-/templates
-    index.html
-/static
-    style.css
-    app.js
-session.json (auto-created after first login)
-```
+* `app.py` — main Flask app and bot logic (start/stop, queue, SSE logs)
+* `render.yaml` — Render service configuration
+* `requirements.txt` — Python dependencies
+* `session.json` — (created/updated by the bot) stores instagrapi session settings
 
 ---
 
-## 🔑 LOGIN SYSTEM (IMPORTANT)
+## Quickstart (local)
 
-1. Enter **Instagram username and password** in the UI.
-2. If Instagram sends a *“Was this you?”* alert:
+1. Create a virtualenv and activate it:
 
-   * Open Instagram → Settings → Login Activity → Approve “Yes, it was me”.
-3. Run bot again → `session.json` will be saved → **Auto-login works next time**.
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # on Windows: venv\\Scripts\\activate
+   ```
+2. Install requirements:
 
-⚠️ The bot does **NOT** support 2FA. Disable 2FA or use an alt account.
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Run the app:
 
----
+   ```bash
+   python app.py
+   ```
+4. API endpoints:
 
-## 📨 MESSAGE INPUT SYSTEM
+   * `POST /start` — Start the bot (long-running background worker)
+   * `POST /stop` — Stop the bot
+   * `GET /status` — Bot status
+   * `GET /logs` — Server-Sent Events (SSE) stream of live logs
+   * `POST /send_once` — Queue a single send task (logs still available)
 
-UI gives you:
+### /start body (JSON)
 
-* **Message box** → Write text message only (no image upload).
-* **Custom Sender Name** (optional)
-* **Group IDs box** → Enter 1 or more Instagram thread IDs (comma-separated).
-
-Example:
-
-```
-340282366841710300949128123456789012345
-340282366841710300112233445566778899001
+```json
+{
+  "username": "your_ig_username",
+  "password": "your_ig_password",
+  "group_ids": ["1234567890123456789"],
+  "message": "Hello from bot",
+  "delay": 3,
+  "cyclone_delay": 10,
+  "attachments": ["/path/to/image.jpg"],
+  "cycles": 1
+}
 ```
 
-✔️ The bot sends messages to each group in cycles.
+* `delay` is the normal wait (seconds) before each send
+* `cyclone_delay` is additional wait after a send (seconds)
+* `attachments` are local file paths on the server (optional)
+* `cycles` is how many times to repeat the message(s)
 
 ---
 
-## ⏱ DELAY SYSTEM
+## Notes & Safety
 
-You can set:
-
-* **Delay (seconds)** → Normal delay before each send
-* **Cyclone Delay (seconds)** → Extra random delay each cycle
-
-Bot calculates small random variations to avoid spam detection.
+* Do **not** use this to spam. Instagram has strict rate limits and anti-abuse checks.
+* The `session.json` is written to the project directory and contains auth settings — keep it private.
+* For attachments: upload files to the server (e.g. to `/tmp/`) and provide their paths in the request body.
 
 ---
 
-## ▶️ STARTING THE BOT
+## Deploying to Render
 
-Click **Start Bot (blue button)**.
-
-Bot begins sending messages according to:
-
-* Message
-* Group IDs
-* Delay values
-
-Live logs appear at the bottom in real time.
+1. Push the repo to GitHub.
+2. Create a new Web Service on Render and connect the repo.
+3. Render will use `render.yaml` to build and run the service.
 
 ---
 
-## ⏹ STOPPING THE BOT
+## Troubleshooting
 
-Click **Stop Bot (red button)**.
+* If login fails, check credentials and look at `/logs` for details.
+* If attachments fail, verify file paths and supported media types.
 
-Bot safely stops at the next delay checkpoint.
-
----
-
-## 🖥 HOW TO DEPLOY ON RENDER
-
-### 1️⃣ Push files to GitHub
-
-Make sure your repo contains:
-
-```
-app.py
-requirements.txt
-render.yaml
-/templates
-/static
-```
-
-### 2️⃣ Go to [https://render.com](https://render.com) → New Web Service
-
-* Connect GitHub Repository
-* Render auto-detects **render.yaml**
-* Click *Deploy*
-
-Render builds and runs the bot using:
-
-```
-gunicorn app:app
-```
-
----
-
-## 📡 LIVE LOGS
-
-Open `/logs` endpoint OR view logs inside the UI.
-Works through SSE — stable on Render.
-
----
-
-## ❗ IMPORTANT NOTES
-
-* Use a **secondary Instagram account** to avoid restrictions.
-* Avoid sending too fast → can lock your account.
-* Do NOT use VPN inside Render.
-* Render free dynos sleep after inactivity.
-
----
-
-## ✔️ READY TO USE
-
-Once deployed:
-
-* Open the web URL
-* Login
-* Enter message + group IDs
-* Click **Start Bot**
-* Watch messages send automatically
-
----
-
-If you want, I can also generate:
-
-* `/templates/index.html`
-* `/static/style.css`
-* `/static/app.js`
-
-Just tell me: **"Create UI files"**
+-- End of README --
