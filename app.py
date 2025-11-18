@@ -1,414 +1,659 @@
 # app.py
-"""
-Instagram DM Sender - Flask backend using instagrapi
-Implements:
-  POST /send   -> start job (JSON config)
-  POST /stop   -> stop job
-  GET  /status -> status json
-  GET  /logs   -> logs (plain text)
-
-Session files: stored under ./sessions/<username>_session.json (auto-created)
-Logs: ./logs/live.log (appends). Recent logs also kept in-memory for quick UI reads.
-"""
 import os
 import time
 import json
 import random
 import traceback
-from threading import Thread, Lock, Event
-from collections import deque
+from threading import Thread, Event, Lock
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Any
+from io import TextIOWrapper
+from typing import List
 
-from flask import Flask, request, jsonify, send_file, abort, Response
+from flask import (
+    Flask, render_template_string, request, redirect, url_for, send_from_directory, jsonify, flash
+)
 
+# Flask-SocketIO for live log streaming
+from flask_socketio import SocketIO, emit
+
+# Instagram client
 try:
     from instagrapi import Client
-except Exception as e:
-    raise RuntimeError("Please install 'instagrapi' (see requirements.txt).") from e
+except Exception:
+    Client = None  # we'll raise clearer error on start if missing
 
-# -------------------------
-# Paths & globals
-# -------------------------
-BASE = Path(__file__).resolve().parent
-LOG_DIR = BASE / "logs"
-SESSION_DIR = BASE / "sessions"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "live.log"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# files used for persisting (optional)
+ACCOUNTS_FILE = os.path.join(APP_DIR, "accounts.json")
+MESSAGES_FILE = os.path.join(APP_DIR, "messages.txt")
+CONFIG_FILE = os.path.join(APP_DIR, "ui_config.json")
+LOG_FILE = os.path.join(APP_DIR, "logs", "live.log")
+os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
 
 app = Flask(__name__)
-THREAD_LOCK = Lock()
+app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-please-change")
+socketio = SocketIO(app, cors_allowed_origins="*")  # works with Render
 
-# in-memory logs
-MAX_IN_MEMORY = 2000
-INMEM = deque(maxlen=MAX_IN_MEMORY)
+# runtime state
+state_lock = Lock()
+worker_thread: Thread = None
+worker_stop_event: Event = Event()
+worker_running = False
 
-def append_log(line: str):
-    t = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    full = f"[{t} UTC] {line}"
-    INMEM.append(full)
+# In-memory configuration (loaded from disk if present)
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+accounts = load_json(ACCOUNTS_FILE, [])  # list of {"username": "...", "password": "..."}
+messages: List[str] = []
+if os.path.exists(MESSAGES_FILE):
+    try:
+        with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
+            messages = [line.rstrip("\n") for line in f if line.strip()]
+    except Exception:
+        messages = []
+
+ui_config = load_json(CONFIG_FILE, {
+    "custom_name": "",
+    "group_chat_ids": [],
+    "min_delay": 3.0,
+    "max_delay": 6.0,
+    "cyclone_pattern": [2.0,5.0,10.0,4.0],
+    "cyclone_jitter": 0.25,
+    "max_retries": 4,
+    "base_backoff": 2.0
+})
+
+# helper logging (sends to both file and socket)
+def log(msg: str):
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = f"[{ts}] {msg}"
+    # write to file
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(full + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
-    print(full)
+    # emit to clients
+    try:
+        socketio.emit("log_line", {"line": line})
+    except Exception:
+        pass
+    print(line)
 
-# -------------------------
-# BotRunner
-# -------------------------
-class BotRunner:
-    def __init__(self):
-        self._thread = None
-        self._stop = Event()
-        self._running = False
-        self._status_lock = Lock()
-        self._status = {
-            "status": "idle",
-            "time": None,
-            "summary": "not started",
-            "current_account": None,
-            "sent_count": 0,
-            "failed_count": 0,
-        }
-        self._config = None
 
-    def status(self):
-        with self._status_lock:
-            return dict(self._status)
+# Utility: save accounts/messages/config optionally
+def save_accounts():
+    try:
+        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(accounts, f, indent=2)
+    except Exception as e:
+        log(f"Failed to save accounts.json: {e}")
 
-    def _set_status(self, **kwargs):
-        with self._status_lock:
-            self._status.update(kwargs)
+def save_messages_file():
+    try:
+        with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
+            for m in messages:
+                f.write(m + "\n")
+    except Exception as e:
+        log(f"Failed to save messages.txt: {e}")
 
-    def start(self, config: Dict[str, Any], single_run: bool = False):
-        with THREAD_LOCK:
-            if self._running:
-                append_log("Start requested but already running.")
-                return {"ok": False, "reason": "already_running"}
-            self._stop.clear()
-            self._running = True
-            self._config = config
-            self._set_status(status="running", time=datetime.utcnow().isoformat() + "Z",
-                             summary="started", sent_count=0, failed_count=0)
-            self._thread = Thread(target=self._run, args=(config, single_run), daemon=True)
-            self._thread.start()
-            append_log("Runner started.")
-            return {"ok": True, "message": "started"}
+def save_ui_config():
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(ui_config, f, indent=2)
+    except Exception as e:
+        log(f"Failed to save ui_config.json: {e}")
 
-    def stop(self):
-        append_log("Stop requested.")
-        self._stop.set()
-        self._set_status(status="stopping")
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
-        self._running = False
-        self._set_status(status="stopped", summary="stopped by user")
-        append_log("Runner stopped.")
-        return {"ok": True}
 
-    def _session_file(self, username: str) -> str:
-        safe = username.replace("@", "").replace(" ", "_")
-        return str(SESSION_DIR / f"{safe}_session.json")
+# Cyclone delay generator
+def cyclone_delay_pattern(idx: int):
+    pattern = ui_config.get("cyclone_pattern") or []
+    jitter_frac = float(ui_config.get("cyclone_jitter", 0.25) or 0.25)
+    if not pattern:
+        base = random.uniform(float(ui_config.get("min_delay", 3.0)), float(ui_config.get("max_delay", 6.0)))
+    else:
+        base = float(pattern[idx % len(pattern)])
+    jitter = jitter_frac * base
+    delay = base + random.uniform(-jitter, jitter)
+    return max(0.2, delay)
 
-    def _ensure_client(self, username: str, password: str) -> Client:
-        append_log(f"Preparing client for {username}")
-        client = Client()
-        sess = self._session_file(username)
+
+def exponential_backoff(attempt: int):
+    base = float(ui_config.get("base_backoff", 2.0))
+    backoff = base * (2 ** (attempt - 1))
+    backoff += random.uniform(0, backoff * 0.25)
+    return backoff
+
+
+# Per-account client creation / session management
+def ensure_client_for_account(account):
+    """
+    Loads or creates an instagrapi.Client for the given account dict.
+    Session file stored as session_{username}.json in the app dir.
+    Returns a logged-in Client instance.
+    """
+    if Client is None:
+        raise RuntimeError("instagrapi is not installed. Add it to requirements.txt and deploy.")
+
+    username = account["username"]
+    password = account.get("password", "")
+    session_file = os.path.join(APP_DIR, f"session_{username}.json")
+    cl = Client()
+    # try load settings
+    try:
+        if os.path.exists(session_file):
+            cl.load_settings(session_file)
+            # try a quick operation; instagrapi's login() will reuse session if valid
+            cl.login(username, password)
+            cl.dump_settings(session_file)
+            log(f"Reused session for {username}")
+            return cl
+    except Exception as e:
+        log(f"Could not reuse session for {username}: {e}. Will attempt fresh login.")
+
+    # fresh login
+    log(f"Logging in as {username} ...")
+    cl = Client()
+    cl.login(username, password)
+    try:
+        cl.dump_settings(session_file)
+    except Exception:
+        log(f"Warning: could not save session file for {username}")
+    log(f"Logged in: {username}")
+    return cl
+
+
+# Core sending loop (runs in background thread)
+def sending_worker(stop_event: Event):
+    global worker_running
+    log("Worker started.")
+    with state_lock:
+        worker_running = True
+
+    # prepare cycle indices
+    account_idx = 0
+    msg_idx = 0
+    send_count = 0
+
+    # Pre-create clients list to reuse logins
+    clients = []
+    for acc in accounts:
         try:
-            if os.path.exists(sess):
-                try:
-                    client.load_settings(sess)
-                    client.login(username, password)  # instagrapi will use settings and cookies if valid
-                    client.dump_settings(sess)
-                    append_log(f"Reused session for {username}")
-                    return client
-                except Exception:
-                    append_log(f"Could not reuse session for {username}; will attempt fresh login.")
-            # fresh login
-            client = Client()
-            client.login(username, password)
-            client.dump_settings(sess)
-            append_log(f"Logged in and saved session for {username}")
-            return client
+            clients.append({"account": acc, "client": ensure_client_for_account(acc)})
         except Exception as e:
-            append_log(f"Login failed for {username}: {e}")
-            raise
+            log(f"Failed to init client for {acc.get('username')}: {e}")
+            clients.append({"account": acc, "client": None})
 
-    def _cyclone(self, pattern: List[float], jitter: float, index: int, min_d: float, max_d: float) -> float:
-        if pattern:
-            base = float(pattern[index % len(pattern)])
-        else:
-            base = random.uniform(min_d or 1.0, max_d or 4.0)
-        j = (jitter or 0.0) * base
-        return max(0.2, base + random.uniform(-j, j))
+    if not clients or not any(c["client"] for c in clients):
+        log("No usable accounts available. Worker exiting.")
+        with state_lock:
+            worker_running = False
+        return
 
-    def _backoff(self, attempt: int, base_backoff: float = 2.0) -> float:
-        b = base_backoff * (2 ** (attempt - 1))
-        b += random.uniform(0, b * 0.25)
-        return b
+    if not messages:
+        log("No messages loaded. Worker exiting.")
+        with state_lock:
+            worker_running = False
+        return
 
-    def _run(self, config: Dict[str, Any], single_run: bool):
-        try:
-            accounts: List[Dict[str, str]] = config.get("accounts") or []
-            messages: List[str] = config.get("messages") or []
-            recipients: List[str] = config.get("recipients") or []
-            custom_name: str = config.get("custom_name") or ""
-            min_delay = float(config.get("min_delay") or 1.5)
-            max_delay = float(config.get("max_delay") or 4.0)
-            cyclone_pattern = config.get("cyclone_pattern") or []
-            cyclone_jitter = float(config.get("cyclone_jitter") or 0.0)
-            max_retries = int(config.get("max_retries") or 3)
-            base_backoff = float(config.get("base_backoff") or 2.0)
+    try:
+        while not stop_event.is_set():
+            # choose account round-robin
+            client_entry = clients[account_idx % len(clients)]
+            account_idx += 1
+            acc = client_entry["account"]
+            cl = client_entry["client"]
+            if cl is None:
+                log(f"Skipping account {acc.get('username')} (no client).")
+                time.sleep(1.0)
+                continue
 
-            if not messages:
-                append_log("No messages provided; aborting.")
-                self._set_status(status="idle", summary="no_messages")
-                self._running = False
-                return
-            if not recipients:
-                append_log("No recipients provided; aborting.")
-                self._set_status(status="idle", summary="no_recipients")
-                self._running = False
-                return
-
-            clients = {}
-            r_index = 0
-            m_index = 0
-            sent = 0
-            failed = 0
-
-            append_log(f"Starting sending loop. recipients={len(recipients)} accounts={len(accounts)} single_run={single_run}")
-
-            # If no accounts provided, fallback to env vars if present
-            if not accounts:
-                env_user = os.getenv("INSTAGRAM_USERNAME")
-                env_pass = os.getenv("INSTAGRAM_PASSWORD")
-                if env_user and env_pass:
-                    accounts = [{"username": env_user, "password": env_pass}]
+            # choose message round-robin and substitute custom name if present
+            raw_msg = messages[msg_idx % len(messages)]
+            msg_idx += 1
+            custom_name = ui_config.get("custom_name") or ""
+            if "{name}" in raw_msg and custom_name:
+                message_to_send = raw_msg.replace("{name}", custom_name)
+            else:
+                # try placeholder @custom_name too
+                if "{custom_name}" in raw_msg and custom_name:
+                    message_to_send = raw_msg.replace("{custom_name}", custom_name)
                 else:
-                    append_log("No accounts configured and no ENV fallback. Aborting.")
-                    self._set_status(status="idle", summary="no_account")
-                    self._running = False
-                    return
+                    message_to_send = raw_msg
 
-            total_to_send = len(recipients) if single_run else None
+            # send to single recipient or groups. UI will pass either recipients (usernames) in messages or group ids.
+            # For this simplified worker we assume messages target a "recipient list" included in accounts config or provided via group_chat_ids in ui_config.
+            # Here we support sending to "targets" loaded into ui_config["targets"] if present, else we iterate group_chat_ids.
+            targets = ui_config.get("targets") or []
+            group_ids = ui_config.get("group_chat_ids") or []
 
-            while not self._stop.is_set():
-                if single_run and r_index >= len(recipients):
-                    append_log("Single-run completed.")
-                    break
+            # If no targets explicit, attempt sending to groups only (group ids as strings)
+            if targets:
+                # targets are Instagram usernames
+                for t in targets:
+                    if stop_event.is_set(): break
+                    send_result = send_text_with_retries(cl, t, message_to_send)
+                    if send_result:
+                        send_count += 1
+                # delay after finishing targets
+            elif group_ids:
+                for gid in group_ids:
+                    if stop_event.is_set(): break
+                    send_result = send_text_to_thread_with_retries(cl, gid, message_to_send)
+                    if send_result:
+                        send_count += 1
+            else:
+                # fallback: send to the account's own "default target" if present
+                fallback_recipient = acc.get("default_target")
+                if fallback_recipient:
+                    send_result = send_text_with_retries(cl, fallback_recipient, message_to_send)
+                    if send_result:
+                        send_count += 1
+                else:
+                    log("No targets configured (targets or group_chat_ids). Worker sleeping.")
+                    time.sleep(5.0)
 
-                recipient = recipients[r_index % len(recipients)]
-                message = messages[m_index % len(messages)]
-                m_index += 1
+            # save sessions
+            try:
+                session_file = os.path.join(APP_DIR, f"session_{acc.get('username')}.json")
+                cl.dump_settings(session_file)
+            except Exception:
+                pass
 
-                if custom_name:
-                    message = message.replace("{name}", custom_name)
+            # apply cyclone delay
+            d = cyclone_delay_pattern(send_count)
+            log(f"Delay applied: {d:.2f}s (cyclone)")
+            # sleep with stop_event responsiveness
+            slept = 0.0
+            while slept < d and not stop_event.is_set():
+                to_sleep = min(0.5, d - slept)
+                time.sleep(to_sleep)
+                slept += to_sleep
 
-                # pick account round-robin
-                account = accounts[r_index % len(accounts)]
-                uname = account.get("username")
-                upass = account.get("password", "")
-                self._set_status(current_account=uname)
+    except Exception as e:
+        log(f"Worker error: {e}\n{traceback.format_exc()}")
+    finally:
+        log("Worker stopped.")
+        with state_lock:
+            worker_running = False
 
-                if uname not in clients:
-                    try:
-                        clients[uname] = self._ensure_client(uname, upass)
-                    except Exception as e:
-                        append_log(f"Skipping account {uname} due to login error: {e}")
-                        failed += 1
-                        r_index += 1
-                        time.sleep(1.0)
-                        continue
 
-                client = clients[uname]
+# send functions with retries
+def send_text_with_retries(client: Client, username: str, message: str):
+    try:
+        user_id = client.user_id_from_username(username)
+    except Exception as e:
+        log(f"Could not resolve user id for {username}: {e}")
+        return False
 
-                success = False
-                attempt = 0
-                while attempt < max_retries and not success and not self._stop.is_set():
-                    attempt += 1
-                    try:
-                        if recipient.isdigit():
-                            # treat as group thread id
-                            client.direct_send(message, thread_ids=[int(recipient)])
-                        else:
-                            uid = client.user_id_from_username(recipient)
-                            client.direct_send(message, [uid])
-                        append_log(f"Sent to {recipient} via {uname} (attempt {attempt})")
-                        sent += 1
-                        success = True
-                    except Exception as e:
-                        append_log(f"Send attempt {attempt} to {recipient} failed: {e}")
-                        if attempt >= max_retries:
-                            append_log(f"Failed to send to {recipient} after {attempt} attempts.")
-                            failed += 1
-                            break
-                        back = self._backoff(attempt, base_backoff)
-                        append_log(f"Retrying after backoff {back:.1f}s")
-                        time.sleep(back)
-
-                # save session best-effort
-                try:
-                    session_file = self._session_file(uname)
-                    client.dump_settings(session_file)
-                except Exception:
-                    pass
-
-                self._set_status(sent_count=sent, failed_count=failed)
-
-                # delay
-                delay = self._cyclone(cyclone_pattern, cyclone_jitter, m_index, min_delay, max_delay)
-                append_log(f"Sleeping {delay:.2f}s")
-                slept = 0.0
-                step = 0.5
-                while slept < delay and not self._stop.is_set():
-                    time.sleep(min(step, delay - slept))
-                    slept += step
-
-                r_index += 1
-                if single_run and total_to_send and r_index >= total_to_send:
-                    append_log("Single-run finished required sends.")
-                    break
-
-            append_log(f"Run finished: sent={sent} failed={failed}")
-            self._set_status(status="idle", summary=f"sent {sent}, failed {failed}", time=datetime.utcnow().isoformat() + "Z",
-                             sent_count=sent, failed_count=failed)
-            self._running = False
+    attempt = 0
+    max_retries = int(ui_config.get("max_retries", 4))
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            client.direct_send(message, [user_id])
+            log(f"Message sent to @{username}")
+            return True
         except Exception as e:
-            append_log("Runner error: " + str(e))
-            append_log(traceback.format_exc())
-            self._set_status(status="failed", summary=str(e))
-            self._running = False
+            log(f"Send attempt {attempt} to @{username} failed: {e}")
+            if attempt >= max_retries:
+                log(f"Giving up on @{username}")
+                return False
+            b = exponential_backoff(attempt)
+            log(f"Retrying after backoff {b:.1f}s")
+            time.sleep(b)
+    return False
 
-# global runner
-RUNNER = BotRunner()
 
-# -------------------------
-# Routes
-# -------------------------
-@app.route("/", methods=["GET"])
-def index():
-    return (
-        "<pre>Instagram DM Sender API\n\n"
-        "POST /send   -> start job (JSON config)\n"
-        "POST /stop   -> stop job\n"
-        "GET  /status -> status json\n"
-        "GET  /logs   -> logs (plain text)\n</pre>"
+def send_text_to_thread_with_retries(client: Client, thread_id: str, message: str):
+    attempt = 0
+    max_retries = int(ui_config.get("max_retries", 4))
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            client.direct_send(message, thread_ids=[thread_id])
+            log(f"Message sent to thread {thread_id}")
+            return True
+        except Exception as e:
+            log(f"Thread send attempt {attempt} to {thread_id} failed: {e}")
+            if attempt >= max_retries:
+                log(f"Giving up on thread {thread_id}")
+                return False
+            b = exponential_backoff(attempt)
+            log(f"Retrying after backoff {b:.1f}s")
+            time.sleep(b)
+    return False
+
+
+# --- Flask routes & UI ---
+DASHBOARD_HTML = """
+<!doctype html>
+<html>
+<head>
+  <title>Instagram DM Bot — Dashboard</title>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background:#f7f9fc; color:#111; }
+    .container { max-width:1100px; margin: 0 auto; }
+    h1 { margin-bottom: 8px; }
+    .card { background:white; border-radius:8px; padding:12px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); margin-bottom:12px; }
+    label { display:block; margin-top:8px; font-weight:600; }
+    input[type=text], input[type=password], textarea { width: 100%; padding:8px; border-radius:6px; border:1px solid #ddd; }
+    .two { display:flex; gap:8px; }
+    .two > div { flex:1; }
+    .btn { padding:10px 14px; border-radius:8px; font-weight:700; cursor:pointer; border:none; }
+    .btn.blue { background:#0b79f7; color:white; }
+    .btn.red { background:#e53e3e; color:white; }
+    .btn.gray { background:#e6eefb; color:#123; }
+    #logs { height: 340px; overflow:auto; background:#0b1220; color:#d6f3ff; padding:8px; border-radius:6px; font-family:monospace; font-size:13px; }
+    .accounts-list { font-size:14px; margin-top:6px; }
+    .small { font-size:13px; color:#555; }
+  </style>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"
+    integrity="sha384-/+M7f4pJQ1sXh/J5gq4D1I1Hn6q5qX7w+fZ1K4dZ7LZp6x3Q3j0H6J6zXbqWq9aJ"
+    crossorigin="anonymous"></script>
+</head>
+<body>
+<div class="container">
+  <h1>Instagram DM Bot — Dashboard</h1>
+
+  <div class="card">
+    <h3>Accounts (multiple)</h3>
+    <form id="addAccountForm" method="post" action="/add_account">
+      <div class="two">
+        <div>
+          <label>Username</label>
+          <input name="username" type="text" placeholder="account_username" required/>
+        </div>
+        <div>
+          <label>Password</label>
+          <input name="password" type="password" placeholder="password" required/>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <button class="btn gray" type="submit">Add account</button>
+        <button class="btn gray" type="button" onclick="location.href='/clear_accounts'">Clear accounts</button>
+      </div>
+    </form>
+
+    <div class="accounts-list small">
+      <strong>Saved accounts:</strong>
+      <ul>
+        {% for a in accounts %}
+          <li>{{ a.username }} {% if a.default_target %} — default target: {{ a.default_target }}{% endif %}</li>
+        {% else %}
+          <li><em>No accounts saved</em></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Messages</h3>
+    <form id="messagesForm" method="post" action="/upload_messages" enctype="multipart/form-data">
+      <label>Type messages (one per line)</label>
+      <textarea name="messages_text" rows="6" placeholder="Hello {name}&#10;Your update is ready...">{{ messages_text }}</textarea>
+      <div style="margin-top:8px;">
+        <label>or upload a <strong>messages.txt</strong> file (one message per line)</label>
+        <input type="file" name="messages_file" accept=".txt" />
+      </div>
+      <div style="margin-top:8px;">
+        <button class="btn gray" type="submit">Save messages</button>
+        <button class="btn gray" type="button" onclick="location.href='/download_messages'">Download messages.txt</button>
+      </div>
+    </form>
+    <div class="small" style="margin-top:8px;">Use <code>{name}</code> placeholder to insert custom name from config.</div>
+  </div>
+
+  <div class="card">
+    <h3>Targets / Groups / Config</h3>
+    <form id="configForm" method="post" action="/save_config">
+      <label>Custom name (for {name} placeholder)</label>
+      <input name="custom_name" type="text" value="{{ ui_config.custom_name or '' }}" />
+
+      <label>Targets (comma-separated Instagram usernames)</label>
+      <input name="targets" type="text" value="{{ targets }}" placeholder="user1,user2,user3" />
+
+      <label>Group chat IDs (comma-separated)</label>
+      <input name="group_chat_ids" type="text" value="{{ group_chat_ids }}" placeholder="1234567890,1122334455" />
+
+      <div class="two">
+        <div>
+          <label>Min delay (seconds)</label>
+          <input name="min_delay" type="text" value="{{ ui_config.min_delay }}" />
+        </div>
+        <div>
+          <label>Max delay (seconds)</label>
+          <input name="max_delay" type="text" value="{{ ui_config.max_delay }}" />
+        </div>
+      </div>
+
+      <label>Cyclone pattern (comma-separated seconds)</label>
+      <input name="cyclone_pattern" type="text" value="{{ cyclone_pattern }}" placeholder="2,5,10,4" />
+
+      <label>Cyclone jitter (fraction, e.g. 0.25)</label>
+      <input name="cyclone_jitter" type="text" value="{{ ui_config.cyclone_jitter }}" />
+
+      <div style="margin-top:8px;">
+        <button class="btn gray" type="submit">Save config</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Controls</h3>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="startBtn" class="btn blue" onclick="startBot()">Start Bot</button>
+      <button id="stopBtn" class="btn red" onclick="stopBot()">Stop Bot</button>
+      <div style="margin-left:12px;" class="small">Worker status: <span id="workerStatus">unknown</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Live logs</h3>
+    <div id="logs"></div>
+    <div style="margin-top:8px;">
+      <button class="btn gray" onclick="clearLogs()">Clear logs (client view)</button>
+      <a class="btn gray" href="/download_log" style="text-decoration:none; margin-left:8px;">Download full log</a>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  var socket = io();
+
+  socket.on('connect', function(){
+    console.log('socket connected');
+    fetch('/status').then(r => r.json()).then(j => {
+      document.getElementById('workerStatus').innerText = j.running ? 'running' : 'stopped';
+    });
+  });
+
+  socket.on('log_line', function(data){
+    var logs = document.getElementById('logs');
+    logs.innerText = (logs.innerText ? logs.innerText + "\\n" : "") + data.line;
+    logs.scrollTop = logs.scrollHeight;
+  });
+
+  function startBot(){
+    fetch('/start', {method:'POST'}).then(r=>r.json()).then(j=> {
+      document.getElementById('workerStatus').innerText = j.ok ? 'running' : 'error';
+      alert(j.message || JSON.stringify(j));
+    });
+  }
+  function stopBot(){
+    fetch('/stop', {method:'POST'}).then(r=>r.json()).then(j=> {
+      document.getElementById('workerStatus').innerText = j.ok ? 'stopped' : 'error';
+      alert(j.message || JSON.stringify(j));
+    });
+  }
+  function clearLogs(){
+    document.getElementById('logs').innerText = '';
+  }
+</script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def home():
+    return redirect(url_for("dashboard"))
+
+@app.route("/dashboard")
+def dashboard():
+    # prepare template variables
+    msgs_text = "\n".join(messages)
+    return render_template_string(
+        DASHBOARD_HTML,
+        accounts=accounts,
+        messages_text=msgs_text,
+        ui_config=ui_config,
+        targets=",".join(ui_config.get("targets") or []),
+        group_chat_ids=",".join(ui_config.get("group_chat_ids") or []),
+        cyclone_pattern=",".join(str(x) for x in ui_config.get("cyclone_pattern") or [])
     )
 
-@app.route("/send", methods=["POST"])
-def send_route():
-    """
-    JSON payload expected (example):
-    {
-      "accounts": [{"username":"u","password":"p"}, ...],
-      "messages": ["Hi {name}", "Another message"],
-      "recipients": ["target1","123456789012345"],
-      "custom_name": "Alex",
-      "min_delay": 3,
-      "max_delay": 6,
-      "cyclone_pattern": [2,5,10],
-      "cyclone_jitter": 0.25,
-      "max_retries": 4,
-      "base_backoff": 2.0,
-      "singleRun": true
-    }
-    """
-    payload = {}
+
+@app.route("/add_account", methods=["POST"])
+def add_account():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "").strip()
+    if not username or not password:
+        flash("username and password required")
+        return redirect(url_for("dashboard"))
+    accounts.append({"username": username, "password": password})
+    save_accounts()
+    log(f"Account added: {username}")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/clear_accounts")
+def clear_accounts():
+    global accounts
+    accounts = []
+    save_accounts()
+    log("Cleared accounts list")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/upload_messages", methods=["POST"])
+def upload_messages():
+    # either text area or file
+    text = request.form.get("messages_text", "").strip()
+    file = request.files.get("messages_file")
+    global messages
+    if file and file.filename:
+        # read file as text
+        stream: TextIOWrapper = TextIOWrapper(file.stream, encoding="utf-8", errors="ignore")
+        uploaded = [ln.rstrip("\n") for ln in stream if ln.strip()]
+        messages = uploaded
+        save_messages_file()
+        log(f"Uploaded messages.txt ({len(messages)} lines)")
+    else:
+        # parse textarea
+        messages = [ln for ln in (text.splitlines()) if ln.strip()]
+        save_messages_file()
+        log(f"Saved messages from textarea ({len(messages)} lines)")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/download_messages")
+def download_messages():
+    if not os.path.exists(MESSAGES_FILE):
+        # create a temporary file from messages list
+        save_messages_file()
+    return send_from_directory(APP_DIR, "messages.txt", as_attachment=True)
+
+
+@app.route("/save_config", methods=["POST"])
+def save_config():
+    ui_config["custom_name"] = request.form.get("custom_name", "").strip()
+    targets = [t.strip() for t in request.form.get("targets", "").split(",") if t.strip()]
+    ui_config["targets"] = targets
+    group_ids = [g.strip() for g in request.form.get("group_chat_ids", "").split(",") if g.strip()]
+    ui_config["group_chat_ids"] = group_ids
     try:
-        payload = request.get_json(force=True)
+        ui_config["min_delay"] = float(request.form.get("min_delay", ui_config.get("min_delay", 3.0)))
+        ui_config["max_delay"] = float(request.form.get("max_delay", ui_config.get("max_delay", 6.0)))
     except Exception:
-        payload = {}
+        pass
+    pat = [float(x) for x in request.form.get("cyclone_pattern", ",".join(str(x) for x in ui_config.get("cyclone_pattern", []))).split(",") if x.strip()]
+    ui_config["cyclone_pattern"] = pat
+    try:
+        ui_config["cyclone_jitter"] = float(request.form.get("cyclone_jitter", ui_config.get("cyclone_jitter", 0.25)))
+    except Exception:
+        pass
+    save_ui_config()
+    log("Saved UI config")
+    return redirect(url_for("dashboard"))
 
-    # basic validation & normalization
-    def as_list(v):
-        if v is None:
-            return []
-        if isinstance(v, list):
-            return v
-        if isinstance(v, str):
-            return [x.strip() for x in v.split(",") if x.strip()]
-        return list(v)
 
-    cfg = {}
-    cfg["accounts"] = payload.get("accounts") or []
-    # also support "accounts" as ["user:pass", ...]
-    parsed_accounts = []
-    for a in cfg["accounts"]:
-        if isinstance(a, dict) and a.get("username"):
-            parsed_accounts.append({"username": a.get("username"), "password": a.get("password", "")})
-        elif isinstance(a, str) and ":" in a:
-            u, p = a.split(":", 1)
-            parsed_accounts.append({"username": u.strip(), "password": p.strip()})
-    cfg["accounts"] = parsed_accounts
+@app.route("/download_log")
+def download_log():
+    if not os.path.exists(LOG_FILE):
+        open(LOG_FILE, "a").close()
+    return send_from_directory(os.path.join(APP_DIR, "logs"), "live.log", as_attachment=True)
 
-    messages = payload.get("messages") or payload.get("messages_text")
-    if isinstance(messages, str):
-        cfg["messages"] = [m.strip() for m in messages.splitlines() if m.strip()]
-    else:
-        cfg["messages"] = as_list(messages)
 
-    recipients = payload.get("recipients") or payload.get("to")
-    if isinstance(recipients, str):
-        cfg["recipients"] = [r.strip() for r in recipients.split(",") if r.strip()]
-    else:
-        cfg["recipients"] = as_list(recipients)
+@app.route("/status")
+def status():
+    return jsonify({"running": worker_running})
 
-    cfg["custom_name"] = payload.get("custom_name") or payload.get("customName") or ""
-    cfg["min_delay"] = payload.get("min_delay") or payload.get("minDelay") or 1.5
-    cfg["max_delay"] = payload.get("max_delay") or payload.get("maxDelay") or 4.0
-    # cyclone pattern may be array or comma string
-    cp = payload.get("cyclone_pattern") or payload.get("cyclonePattern") or payload.get("cyclone_pattern")
-    if isinstance(cp, str):
-        try:
-            cfg["cyclone_pattern"] = [float(x.strip()) for x in cp.split(",") if x.strip()]
-        except Exception:
-            cfg["cyclone_pattern"] = []
-    else:
-        cfg["cyclone_pattern"] = cp or []
-    cfg["cyclone_jitter"] = payload.get("cyclone_jitter") or payload.get("cycloneJitter") or 0.0
-    cfg["max_retries"] = int(payload.get("max_retries") or payload.get("maxRetries") or 3)
-    cfg["base_backoff"] = float(payload.get("base_backoff") or payload.get("baseBackoff") or 2.0)
-    single_run = bool(payload.get("singleRun") or payload.get("single_run"))
 
-    # if missing messages/recipients return error
-    if not cfg.get("messages"):
-        return jsonify({"ok": False, "reason": "no_messages"}), 400
-    if not cfg.get("recipients"):
-        return jsonify({"ok": False, "reason": "no_recipients"}), 400
+@app.route("/start", methods=["POST"])
+def start():
+    global worker_thread, worker_stop_event, worker_running
+    with state_lock:
+        if worker_running:
+            return jsonify({"ok": False, "message": "Worker already running."})
+        # reset stop event and start thread
+        worker_stop_event = Event()
+        worker_thread = Thread(target=sending_worker, args=(worker_stop_event,), daemon=True)
+        worker_thread.start()
+        # small delay until thread sets worker_running
+        return jsonify({"ok": True, "message": "Worker started."})
 
-    # if no accounts provided, runner will attempt env fallback (INSTAGRAM_USERNAME/INSTAGRAM_PASSWORD)
-    res = RUNNER.start(cfg, single_run=single_run)
-    return jsonify(res)
 
 @app.route("/stop", methods=["POST"])
-def stop_route():
-    return jsonify(RUNNER.stop())
+def stop():
+    global worker_stop_event
+    with state_lock:
+        if not worker_running:
+            return jsonify({"ok": True, "message": "Worker already stopped."})
+        # signal stop
+        worker_stop_event.set()
+        return jsonify({"ok": True, "message": "Stop signal sent."})
 
-@app.route("/status", methods=["GET"])
-def status_route():
-    return jsonify(RUNNER.status())
 
-@app.route("/logs", methods=["GET"])
-def logs_route():
-    full = request.args.get("full", "0") in ("1", "true", "yes")
-    if full:
-        try:
-            return send_file(str(LOG_FILE), mimetype="text/plain", as_attachment=False, download_name="live.log")
-        except Exception:
-            abort(404)
-    text = "\n".join(list(INMEM)[-MAX_IN_MEMORY:])
-    return Response(text, mimetype="text/plain; charset=utf-8")
+# SocketIO route to stream last lines on connect
+@socketio.on("connect")
+def on_connect():
+    # send last 200 lines from log file for context
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()[-200:]
+            for l in lines:
+                emit("log_line", {"line": l})
+    except Exception:
+        pass
 
-# -------------------------
-# Run app
-# -------------------------
+
 if __name__ == "__main__":
-    if not LOG_FILE.exists():
-        LOG_FILE.write_text("")
-    append_log("Starting Instagram DM Sender API (instagrapi)")
+    # ensure environment has instagrapi
+    if Client is None:
+        print("ERROR: instagrapi not installed. Add 'instagrapi' to requirements.txt")
+    # create files if missing
+    save_accounts()
+    save_messages_file()
+    save_ui_config()
+    # run with socketio (eventlet works on Render)
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    log("Starting Flask app (development).")
+    socketio.run(app, host="0.0.0.0", port=port)
