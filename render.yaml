@@ -1,4 +1,3 @@
-# render.yaml - example for Render
 services:
   - type: web
     name: instagram-dm-sender
@@ -7,4 +6,4 @@ services:
     region: oregon
     branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2
+    startCommand: gunicorn -k eventlet -w 1 app:app --bind 0.0.0.0:$PORT
