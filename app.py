@@ -1,260 +1,206 @@
 import os
-import time
-import json
-import random
 import threading
-from flask import Flask, request, render_template_string, Response, redirect
+import time
+import random
+from flask import Flask, render_template_string, request, Response
 from instagrapi import Client
 
-# ==========================================
-# PATH FIX FOR RENDER & LOCAL
-# ==========================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SESSION_DIR = os.path.join(BASE_DIR, "sessions")
-SESSION_FILE = os.path.join(SESSION_DIR, "session.json")
-
-if not os.path.exists(SESSION_DIR):
-    os.makedirs(SESSION_DIR)
-
-# ==========================================
-# GLOBALS
-# ==========================================
+# Ensure sessions folder exists
+os.makedirs('sessions', exist_ok=True)
+SESSION_PATH = 'sessions/session.json'
 
 app = Flask(__name__)
-LOG_BUFFER = []
-STOP_EVENT = threading.Event()
-WORKER_THREAD = None
-CLIENT = None
 
-# ==========================================
-# HTML UI (Bootstrap)
-# ==========================================
+# Globals
+client = None
+bot_running = False
+stop_event = threading.Event()
+log_buffer = []
 
-PAGE = """
+# Utility: log to buffer
+
+def add_log(msg):
+    log_buffer.append(msg)
+    print(msg)
+
+# Login + session loader
+
+def ensure_client(username, password):
+    global client
+    cl = Client()
+
+    if os.path.exists(SESSION_PATH):
+        try:
+            cl.load_settings(SESSION_PATH)
+            cl.login(username, password)
+            add_log("[SESSION] Loaded existing session.json and logged in.")
+            client = cl
+            return cl
+        except Exception as e:
+            add_log(f"[SESSION ERROR] Failed to load session.json: {e}")
+
+    # Otherwise login fresh
+    try:
+        cl.login(username, password)
+        cl.dump_settings(SESSION_PATH)
+        add_log("[SESSION] New session.json created.")
+        client = cl
+        return cl
+    except Exception as e:
+        add_log(f"[LOGIN ERROR] {e}")
+        return None
+
+# Message sender worker thread
+
+def worker(username, password, message, group_ids, base_delay, min_cyc, max_cyc):
+    global bot_running
+    bot_running = True
+    stop_event.clear()
+
+    cl = ensure_client(username, password)
+    if not cl:
+        add_log("[FATAL] Login failed. Cannot start bot.")
+        bot_running = False
+        return
+
+    add_log("[BOT] Started.")
+
+    while not stop_event.is_set():
+        for gid in group_ids:
+            if stop_event.is_set():
+                break
+
+            try:
+                cl.direct_send(message, thread_ids=[gid])
+                add_log(f"[SENT] Message sent to group ID: {gid}")
+            except Exception as e:
+                add_log(f"[ERROR] Failed to send to {gid}: {e}")
+
+            # Apply delays
+            add_log(f"[DELAY] Base delay {base_delay}s")
+            time.sleep(base_delay)
+
+            cyclone = random.randint(min_cyc, max_cyc)
+            add_log(f"[CYCLONE] Extra delay {cyclone}s")
+            time.sleep(cyclone)
+
+    bot_running = False
+    add_log("[BOT] Stopped.")
+
+# Live logs via SSE
+
+def stream_logs():
+    last = 0
+    while True:
+        while last < len(log_buffer):
+            data = log_buffer[last]
+            last += 1
+            yield f"data: {data}\n\n"
+        time.sleep(0.3)
+
+# UI Page (Bootstrap)
+html = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Instagram Group Bot</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background: #f5f7fa; }
-        .card { border-radius: 20px; }
-        .log-box {
-            width: 100%;
-            height: 300px;
-            background: #000;
-            color: #0f0;
-            padding: 10px;
-            font-family: monospace;
-            overflow-y: scroll;
-            border-radius: 10px;
-        }
-        .header {
-            padding: 20px;
-            text-align: center;
-        }
-    </style>
+<title>Instagram Group Bot</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body { background: #f0f2f5; }
+.card { border-radius: 16px; }
+.log-box {
+    height: 300px;
+    background: #000;
+    color: #0f0;
+    padding: 10px;
+    overflow-y: scroll;
+    border-radius: 10px;
+}
+</style>
 </head>
+<body class="p-4">
+<div class="container">
+    <h2 class="mb-4 text-center">Instagram Group Message Bot</h2>
 
-<body>
-<div class="container mt-4">
-    <div class="header">
-        <h2 class="fw-bold">Instagram Group Message Bot</h2>
-        <p class="text-muted">Login → Auto Session → Start / Stop → Live Logs → Delays</p>
-    </div>
-
-    <div class="card shadow p-4">
+    <div class="card p-4 shadow">
         <form method="POST" enctype="multipart/form-data">
+            <h5>Login Details</h5>
+            <input class="form-control mb-2" name="username" placeholder="Instagram Username" required>
+            <input class="form-control mb-3" name="password" placeholder="Instagram Password" type="password" required>
 
-            <h5 class="fw-bold">Instagram Login</h5>
-            <input name="username" class="form-control mt-2" placeholder="Instagram Username" required>
-            <input name="password" class="form-control mt-2" type="password" placeholder="Instagram Password" required>
+            <h5>Message</h5>
+            <textarea class="form-control mb-2" name="message" placeholder="Enter message..."></textarea>
+            <label>Or upload message file (.txt)</label>
+            <input type="file" class="form-control mb-3" name="msgfile">
 
-            <hr>
+            <h5>Group Thread IDs (one per line)</h5>
+            <textarea class="form-control mb-3" name="groups" required></textarea>
 
-            <h5 class="fw-bold">Message</h5>
-            <textarea name="message" class="form-control mt-2" placeholder="Type your message"></textarea>
+            <h5>Delays</h5>
+            <input class="form-control mb-2" name="base_delay" placeholder="Base Delay (seconds)" required>
+            <input class="form-control mb-2" name="min_cyc" placeholder="Min Cyclone Delay" required>
+            <input class="form-control mb-3" name="max_cyc" placeholder="Max Cyclone Delay" required>
 
-            <p class="text-center mt-2">OR</p>
-
-            <label class="form-label fw-bold">Upload .txt Message File:</label>
-            <input type="file" class="form-control" name="msgfile">
-
-            <hr>
-
-            <h5 class="fw-bold">Group Thread IDs (one per line)</h5>
-            <textarea name="threads" class="form-control mt-2" placeholder="3402823....."></textarea>
-
-            <hr>
-
-            <h5>Delay (Seconds)</h5>
-            <input name="delay" class="form-control" placeholder="5">
-
-            <h5 class="mt-3">Cyclone Delay Range</h5>
-            <input name="cyclone_min" class="form-control mt-2" placeholder="Min (e.g. 3)">
-            <input name="cyclone_max" class="form-control mt-2" placeholder="Max (e.g. 10)">
-
-            <hr>
-
-            <button name="action" value="start" class="btn btn-primary w-100 py-2 mt-2">Start Bot</button>
-            <button name="action" value="stop" class="btn btn-danger w-100 py-2 mt-2">Stop Bot</button>
+            <button name="action" value="start" class="btn btn-primary w-100 mb-2">START BOT</button>
+            <button name="action" value="stop" class="btn btn-danger w-100">STOP BOT</button>
         </form>
     </div>
 
-    <div class="card shadow p-4 mt-4">
-        <h5 class="fw-bold">Live Logs</h5>
-        <div id="logs" class="log-box"></div>
-    </div>
+    <h4 class="mt-4">Live Logs</h4>
+    <div class="log-box" id="logs"></div>
 </div>
 
 <script>
-    var logBox = document.getElementById("logs");
-    var evtSource = new EventSource("/logs");
+var logBox = document.getElementById("logs");
+var evt = new EventSource("/logs");
 
-    evtSource.onmessage = function(event) {
-        logBox.innerHTML += event.data + "<br>";
-        logBox.scrollTop = logBox.scrollHeight;
-    };
+evt.onmessage = function(e) {
+    logBox.innerHTML += e.data + "<br>";
+    logBox.scrollTop = logBox.scrollHeight;
+};
 </script>
 
 </body>
 </html>
 """
 
-# ==========================================
-# LOGGING
-# ==========================================
-
-def log(msg):
-    print(msg)
-    LOG_BUFFER.append(msg)
-
-# ==========================================
-# INSTAGRAM LOGIN + SESSION LOADING
-# ==========================================
-
-def get_client(username, password):
-    global CLIENT
-
-    cl = Client()
-
-    # Try load existing session
-    if os.path.exists(SESSION_FILE):
-        try:
-            cl.load_settings(SESSION_FILE)
-            cl.login(username, password)
-            log("Loaded session.json & logged in successfully.")
-        except Exception as e:
-            log(f"Session invalid — logging in fresh. Reason: {e}")
-            cl = Client()
-            cl.login(username, password)
-            cl.dump_settings(SESSION_FILE)
-            log("New session.json created.")
-    else:
-        log("No session found — logging in fresh.")
-        cl.login(username, password)
-        cl.dump_settings(SESSION_FILE)
-        log("session.json created.")
-
-    CLIENT = cl
-    return cl
-
-# ==========================================
-# WORKER THREAD
-# ==========================================
-
-def start_worker(username, password, threads, message, delay, min_cyc, max_cyc):
-    STOP_EVENT.clear()
-    client = get_client(username, password)
-
-    log("Bot started.")
-
-    while not STOP_EVENT.is_set():
-        for thread_id in threads:
-
-            if STOP_EVENT.is_set():
-                break
-
-            try:
-                client.direct_send(message, [], thread_ids=[thread_id])
-                log(f"Sent message to group: {thread_id}")
-            except Exception as e:
-                log(f"Error sending to {thread_id}: {e}")
-
-            time.sleep(delay)
-
-            cyclone = random.randint(min_cyc, max_cyc)
-            log(f"Cyclone delay: {cyclone}s")
-            time.sleep(cyclone)
-
-    log("Bot stopped by user request.")
-
-# ==========================================
-# ROUTES
-# ==========================================
-
-@app.route("/", methods=["GET", "POST"])
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    global WORKER_THREAD
+    global bot_running
 
-    if request.method == "POST":
+    if request.method == 'POST':
+        action = request.form.get('action')
 
-        # STOP BOT
-        if request.form.get("action") == "stop":
-            STOP_EVENT.set()
-            log("Stop requested by user.")
-            return redirect("/")
+        if action == 'start' and not bot_running:
+            username = request.form['username']
+            password = request.form['password']
 
-        # START BOT
-        if request.form.get("action") == "start":
-            username = request.form.get("username").strip()
-            password = request.form.get("password").strip()
+            # Get message
+            message = request.form.get('message')
+            msgfile = request.files.get('msgfile')
+            if msgfile and msgfile.filename:
+                message = msgfile.read().decode('utf-8')
 
-            # message from box OR file
-            message = request.form.get("message").strip()
-            file = request.files.get("msgfile")
-            if file and file.filename:
-                message = file.read().decode("utf-8")
+            # Group IDs
+            groups = request.form['groups'].splitlines()
+            groups = [g.strip() for g in groups if g.strip()]
 
-            threads = [t.strip() for t in request.form.get("threads").split("\n") if t.strip()]
+            # Delays
+            base_delay = int(request.form['base_delay'])
+            min_cyc = int(request.form['min_cyc'])
+            max_cyc = int(request.form['max_cyc'])
 
-            delay = int(request.form.get("delay") or 5)
-            min_c = int(request.form.get("cyclone_min") or 3)
-            max_c = int(request.form.get("cyclone_max") or 10)
+            threading.Thread(target=worker, args=(username, password, message, groups, base_delay, min_cyc, max_cyc), daemon=True).start()
 
-            WORKER_THREAD = threading.Thread(
-                target=start_worker,
-                args=(username, password, threads, message, delay, min_c, max_c),
-                daemon=True
-            )
+        elif action == 'stop':
+            stop_event.set()
+            add_log("[COMMAND] Stop requested.")
 
-            WORKER_THREAD.start()
-            return redirect("/")
+    return render_template_string(html)
 
-    return render_template_string(PAGE)
+@app.route('/logs')
+def logs():
+    return Response(stream_logs(), mimetype='text/event-stream')
 
-
-# ==========================================
-# STREAM LOGS (SSE)
-# ==========================================
-
-@app.route("/logs")
-def stream_logs():
-    def event_stream():
-        last = 0
-        while True:
-            if len(LOG_BUFFER) > last:
-                yield f"data: {LOG_BUFFER[last]}\n\n"
-                last += 1
-            time.sleep(0.5)
-
-    return Response(event_stream(), mimetype="text/event-stream")
-
-# ==========================================
-# RUN APP
-# ==========================================
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
