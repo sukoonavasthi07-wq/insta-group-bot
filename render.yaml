@@ -2,12 +2,9 @@ services:
   - type: web
     name: instagram-group-bot
     env: python
-    disk:
-      name: session-disk
-      mountPath: /opt/render/project/src/sessions
-      sizeGB: 1
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10
+      PORT: 5000
