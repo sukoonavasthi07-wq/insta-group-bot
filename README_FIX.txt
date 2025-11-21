@@ -1,129 +1,142 @@
-# README_FIX.txt
+# README_FIX.txt (Updated Version)
 
-## Instagram Group Message Bot (Render + Flask + Instagrapi)
-
-### Fully Working: Login → Auto Session.json → Start/Stop Bot → Live Logs → Delays + Cyclone
-
----
-
-## 1. LOGIN DETAILS (Required)
-
-Enter your **Instagram Username** and **Instagram Password**.
-
-* Automatically creates `/sessions/session.json`.
-* Reuses the same session every time.
-* Password is NOT saved to disk.
+## 📌 Instagram Group Message Bot — Complete Guide
+This README provides full instructions for using the **Real-Mode Instagram Group Messaging Bot** with full support for:
+- Dark / Neon / Glassmorphism UI
+- Multi-account login
+- Session.json auto-generation
+- Message rotation
+- Cyclone delays
+- Real-time logs (SSE)
+- Render deployment
 
 ---
 
-## 2. WRITE MESSAGE OR UPLOAD TXT
+## ✅ 1. Login Details
+Enter **Instagram Username** and **Password**.
+- Password is **never stored**.
+- Session settings are saved to:
+```
+sessions/<username>_session.json
+```
 
+If Instagram triggers 2FA/checkpoint, login once manually on mobile, then restart bot.
+
+---
+
+## ✅ 2. Message Input
 You may:
-
-* Type a custom message manually, **or**
-* Upload a `.txt` file containing the message.
-
----
-
-## 3. CUSTOM NAME OR USERNAME (Optional)
-
-Write a custom name or Instagram username for identifying logs. (Not used for sending.)
+### A) Type message manually
+### B) Upload `.txt` file containing multiple messages
+- If the uploaded file contains multiple lines, the bot will **rotate messages**.
 
 ---
 
-## 4. GROUP CHAT IDs (Required)
-
-Add Instagram **Group Thread IDs**, one per line.
-Example:
-
+## ✅ 3. Group Thread IDs
+Enter Instagram **group chat IDs** (one per line):
 ```
-340282366841710300949128173567xxxxxxx
-340282366841710300948232347567xxxxxxx
+34028236684171030094836434756xxxxxx
+34028236684171030094912817356xxxxxx
 ```
+Bot will send messages sequentially to each ID.
 
 ---
 
-## 5. DELAYS BETWEEN MESSAGES
+## ✅ 4. Delays & Cyclone Pattern
+### Base Delay
+Delay between messages in seconds.
 
-Add base delay (seconds), e.g.:
-
+### Cyclone Delay Range
+Bot applies a random delay:
 ```
-8
+random(min_cyclone, max_cyclone)
 ```
-
-This delay is applied between each message.
+This prevents detection and rate-limit blocks.
 
 ---
 
-## 6. CYCLONE DELAYS (Randomized Delays)
+## ✅ 5. Multi-Account Support
+You can add multiple accounts by entering different login credentials.
+Each account will have a unique session stored.
 
-Add random delay range:
-
-```
-Min: 3
-Max: 12
-```
-
-Bot uses `random(min, max)` before sends.
+The bot switches accounts automatically.
 
 ---
 
-## 7. START / STOP BOT
-
+## ✅ 6. Start / Stop Bot
 ### 🔵 START BOT
-
-* Logs into Instagram
-* Loads/creates session.json
-* Begins messaging loop
-* Applies delays
-* Shows live logs
-* Runs 24/7 until stopped
+- Logs in account
+- Creates session.json if not present
+- Loads all message rules
+- Starts background worker thread
+- Applies base/cyclone delays
+- Shows real-time logs
 
 ### 🔴 STOP BOT
-
-* Graceful shutdown
-* Halts message sending immediately
-
----
-
-## 8. LIVE LOGS
-
-Live logs include:
-
-* Message sent status
-* Failures & retries
-* Cyclone delay usage
-* Session creation logs
-* Start/stop notifications
-
-Logs stream in real time using SSE.
+- Stops message loop immediately
+- Thread safe
+- UI updates instantly
 
 ---
 
-## 9. RUNNING THE BOT
+## ✅ 7. Live Logs (Real Time)
+The UI shows:
+- Login events
+- Session load success/failures
+- Message send success
+- Errors & retries
+- Delay timers
+- Stops & restarts
 
-Start the app:
+Logs are streamed via **SSE**.
 
+---
+
+## 🎨 8. UI Theme (Dark + Neon + Glassmorphism)
+The UI uses:
+- Deep dark background
+- Neon blue & neon green glow
+- Frosted glass cards
+- Smooth rounded edges (16–25px)
+- Animated hover effects
+
+If you want theme presets, ask: **"Add theme presets"**
+
+---
+
+## 🚀 9. Render Deployment
+Use the included `render.yaml` file.
+Build command:
+```
+pip install -r requirements.txt
+```
+Start command:
 ```
 python app.py
 ```
-
-Deploy to Render using `render.yaml`. The web UI loads automatically.
+Render will expose the web UI.
 
 ---
 
-## 10. FILES INCLUDED
-
+## 📁 10. Project Files
 ```
 app.py
-README_FIX.txt
 requirements.txt
-yaml (render.yaml)
-sessions/session.json (auto)
+render.yaml
+README_FIX.txt
+sessions/ <auto created>
 ```
 
 ---
 
-## 11. IMPORTANT NOTE
+## ⚠️ 11. Important Notes
+- Use responsibly; Instagram blocks spam.
+- Avoid messaging too fast.
+- Expect occasional rate limits.
+- 2FA / checkpoint must be resolved manually once.
 
-If Instagram asks for 2FA or checkpoint, complete it manually on mobile. After that, the bot will continue using `session.json`.
+---
+
+## 🎉 Finished!
+Your bot is now fully functional and documented.
+If you want ZIP packaging or theme presets, just say the word!
