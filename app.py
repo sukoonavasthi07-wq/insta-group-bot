@@ -1,48 +1,51 @@
-import json
 import time
 import random
-from fastapi import FastAPI
 from instagrapi import Client
-from telegram.ext import Updater, MessageHandler, Filters
-import config
-import os
-
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {"status": "Bot is running on Render"}
-
-# Load delays from delays.json
-def load_delays():
-    with open("delays.json", "r") as f:
-        return json.load(f)["delay_seconds_list"]
-
-# persistent session directory
-PERSIST_DIR = "/data"
-os.makedirs(PERSIST_DIR, exist_ok=True)
-SESSION_FILE = os.path.join(PERSIST_DIR, "insta_session.json")
+from config import INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_GROUP_ID
 
 cl = Client()
 
-try:
-    cl.load_settings(SESSION_FILE)
-    cl.login(config.INSTAGRAM_USERNAME, config.INSTAGRAM_PASSWORD)
-except:
-    cl.login(config.INSTAGRAM_USERNAME, config.INSTAGRAM_PASSWORD)
-    cl.dump_settings(SESSION_FILE)
+def instagram_login():
+    try:
+        print("Trying to load session.json...")
+        cl.load_settings("session.json")
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        cl.get_timeline_feed()
+        print("Logged in using session.json")
+    except Exception as e:
+        print("Session invalid or missing. Logging in fresh:", e)
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        cl.dump_settings("session.json")
+        print("New session.json auto-generated!")
 
-def send_to_instagram(message):
-    delays = load_delays()
-    delay = random.choice(delays)
-    time.sleep(delay)
-    cl.direct_send(message, [config.INSTAGRAM_GROUP_ID])
 
-def handle(update, context):
-    text = update.message.text
-    send_to_instagram(text)
+def send_message_auto():
+    # Load messages
+    with open("messages.txt", "r", encoding="utf-8") as f:
+        messages = [msg.strip() for msg in f.readlines() if msg.strip()]
 
-updater = Updater(config.TELEGRAM_BOT_TOKEN, use_context=True)
-dp = updater.dispatcher
-dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle))
-updater.start_polling()
+    if not messages:
+        print("messages.txt is EMPTY. Add messages first.")
+        return
+
+    print(f"Loaded {len(messages)} messages. Auto-sender started.\n")
+
+    while True:
+        msg = random.choice(messages)
+        delay = random.choice([10, 20, 30, 40, 50, 60])
+
+        print(f"Next message in {delay} seconds...")
+        time.sleep(delay)
+
+        try:
+            cl.direct_send(msg, thread_ids=[INSTAGRAM_GROUP_ID])
+            print(f"✓ Sent: {msg}")
+        except Exception as e:
+            print("❌ Sending error:", e)
+            print("Waiting 60 seconds before retry...")
+            time.sleep(60)
+
+
+if __name__ == "__main__":
+    instagram_login()
+    send_message_auto()
