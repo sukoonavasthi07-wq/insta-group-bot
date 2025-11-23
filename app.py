@@ -5,47 +5,53 @@ from config import INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_GROUP_ID
 
 cl = Client()
 
+
 def instagram_login():
+    print("Attempting session load...")
+
     try:
-        print("Trying to load session.json...")
         cl.load_settings("session.json")
         cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
         cl.get_timeline_feed()
-        print("Logged in using session.json")
+        print("Session loaded successfully.")
     except Exception as e:
-        print("Session invalid or missing. Logging in fresh:", e)
+        print("Session missing or invalid. Logging in fresh:", e)
         cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
         cl.dump_settings("session.json")
-        print("New session.json auto-generated!")
+        print("New session.json created.")
 
 
-def send_message_auto():
-    # Load messages
-    with open("messages.txt", "r", encoding="utf-8") as f:
-        messages = [msg.strip() for msg in f.readlines() if msg.strip()]
-
-    if not messages:
-        print("messages.txt is EMPTY. Add messages first.")
+def auto_sender():
+    # Load messages from file
+    try:
+        with open("messages.txt", "r", encoding="utf-8") as f:
+            messages = [line.strip() for line in f.readlines() if line.strip()]
+    except FileNotFoundError:
+        print("messages.txt NOT FOUND — create the file first!")
         return
 
-    print(f"Loaded {len(messages)} messages. Auto-sender started.\n")
+    if not messages:
+        print("messages.txt is empty — add some lines!")
+        return
+
+    print(f"Loaded {len(messages)} messages. Starting auto-poster...")
 
     while True:
         msg = random.choice(messages)
-        delay = random.choice([10, 20, 30, 40, 50, 60])
 
-        print(f"Next message in {delay} seconds...")
+        delay = random.choice([10, 20, 30, 40, 50, 60])
+        print(f"\nWaiting {delay} seconds before next message...")
         time.sleep(delay)
 
         try:
             cl.direct_send(msg, thread_ids=[INSTAGRAM_GROUP_ID])
-            print(f"✓ Sent: {msg}")
+            print(f"Sent message: {msg}")
         except Exception as e:
-            print("❌ Sending error:", e)
-            print("Waiting 60 seconds before retry...")
+            print("Send error:", e)
+            print("Sleeping 60 seconds, retrying...")
             time.sleep(60)
 
 
 if __name__ == "__main__":
     instagram_login()
-    send_message_auto()
+    auto_sender()
