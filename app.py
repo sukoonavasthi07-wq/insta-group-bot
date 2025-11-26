@@ -2,15 +2,18 @@ import os
 import time
 import json
 import random
+import threading
 from instagrapi import Client
+from fastapi import FastAPI
+import uvicorn
 
 # -------------------------
 # CONFIG
 # -------------------------
+
 IG_USERNAME = "dracuhikehde"
 IG_PASSWORD = "Dracu420"
-
-INSTAGRAM_THREAD_ID = "788851167511644"  # Replace with your real thread ID
+INSTAGRAM_THREAD_ID = "788851167511644"
 
 MESSAGES_FILE = "messages.txt"
 DELAY_FILE = "delays.json"
@@ -20,52 +23,39 @@ cl = Client()
 
 
 # -------------------------
-# SESSION HANDLING
+# SESSION FUNCTIONS
 # -------------------------
 
 def save_session():
-    """Save session to file"""
     try:
         session = cl.get_session()
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+        with open(SESSION_FILE, "w") as f:
             json.dump(session, f)
-        print("Instagram session saved.")
+        print("Session saved.")
     except Exception as e:
-        print("Failed to save session:", e)
+        print("Session save error:", e)
 
 
 def load_session():
-    """Try loading an existing session"""
     if not os.path.exists(SESSION_FILE):
         return False
-
     try:
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+        with open(SESSION_FILE, "r") as f:
             session = json.load(f)
-
         cl.set_session(session)
         cl.login(IG_USERNAME, IG_PASSWORD)
         print("Logged in using saved session.")
         return True
-
-    except Exception as e:
-        print("Saved session failed:", e)
+    except:
         return False
 
 
 def login_instagram():
-    """Login using session or fresh login"""
-    print("Logging into Instagram...")
-
+    print("Logging in...")
     if load_session():
         return
-
-    try:
-        cl.login(IG_USERNAME, IG_PASSWORD)
-        save_session()
-        print("Instagram login successful.")
-    except Exception as e:
-        print("LOGIN FAILED:", e)
+    cl.login(IG_USERNAME, IG_PASSWORD)
+    save_session()
 
 
 # -------------------------
@@ -73,44 +63,56 @@ def login_instagram():
 # -------------------------
 
 def load_messages():
-    """Load message list from file"""
     if not os.path.exists(MESSAGES_FILE):
-        print("messages.txt not found!")
         return []
-
-    with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
-        lines = [msg.strip() for msg in f.readlines() if msg.strip()]
-
-    return lines
+    with open(MESSAGES_FILE, "r") as f:
+        return [line.strip() for line in f if line.strip()]
 
 
 def load_delays():
-    """Load delay list"""
     if not os.path.exists(DELAY_FILE):
-        return [5]  # default fallback
-
+        return [10]
     with open(DELAY_FILE, "r") as f:
         return json.load(f)["delay_seconds_list"]
 
 
-def auto_send_messages():
-    """Send each message one by one"""
+def bot_loop():
+    login_instagram()
+
     messages = load_messages()
     delays = load_delays()
 
-    print(f"Total messages to send: {len(messages)}")
+    print(f"Loaded {len(messages)} messages.")
 
-    for msg in messages:
-        delay = random.choice(delays)
-        print(f"\nWaiting {delay} seconds...")
-        time.sleep(delay)
-
-        try:
-            cl.direct_send(msg, [INSTAGRAM_THREAD_ID])
-            print(f"SENT TO INSTAGRAM: {msg}")
-        except Exception as e:
-            print("FAILED:", e)
-
-    print("\nAll messages sent. Sleeping forever...")
     while True:
-        time.sleep(999999)
+        for msg in messages:
+            delay = random.choice(delays)
+            print(f"Waiting {delay} seconds...")
+            time.sleep(delay)
+            try:
+                cl.direct_send(msg, [INSTAGRAM_THREAD_ID])
+                print("Sent:", msg)
+            except Exception as e:
+                print("Send error:", e)
+
+
+# -------------------------
+# FASTAPI SERVER (Required for FREE Render Web Service)
+# -------------------------
+
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {"status": "Bot running"}
+
+def start_bot():
+    thread = threading.Thread(target=bot_loop)
+    thread.daemon = True
+    thread.start()
+
+
+if __name__ == "__main__":
+    start_bot()
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
