@@ -17,7 +17,6 @@ INSTAGRAM_THREAD_ID = os.getenv("INSTAGRAM_THREAD_ID", "788851167511644")
 MESSAGES_FILE = "messages.txt"
 DELAY_FILE = "delays.json"
 SESSION_FILE = "session.json"
-SENT_FILE = "sent.json"
 
 cl = Client()
 
@@ -73,16 +72,6 @@ def load_delays():
         data = json.load(f)
         return data.get("delay_seconds_list", [10])
 
-def load_sent():
-    if not os.path.exists(SENT_FILE):
-        return []
-    with open(SENT_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_sent(sent_list):
-    with open(SENT_FILE, "w", encoding="utf-8") as f:
-        json.dump(sent_list, f)
-
 # -------------------------
 # BOT LOOP
 # -------------------------
@@ -95,7 +84,6 @@ def bot_loop():
 
     messages = load_messages()
     delays = load_delays()
-    sent_messages = load_sent()
 
     if not messages:
         print("⚠️ No messages found. Add messages in messages.txt")
@@ -105,18 +93,12 @@ def bot_loop():
     
     while True:
         for msg in messages:
-            if msg in sent_messages:
-                continue  # skip already sent messages
-
             delay = random.choice(delays)
             print(f"⏱ Waiting {delay} seconds before sending message...")
             time.sleep(delay)
-
             try:
                 cl.direct_send(msg, [INSTAGRAM_THREAD_ID])
                 print(f"✅ Sent: {msg}")
-                sent_messages.append(msg)
-                save_sent(sent_messages)
             except Exception as e:
                 print("❌ Send error:", e)
 
