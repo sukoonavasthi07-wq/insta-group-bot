@@ -2,32 +2,30 @@ import os
 import time
 import json
 import random
-from telegram.ext import Updater, MessageHandler, Filters
 from instagrapi import Client
 
 # -------------------------
 # CONFIG
 # -------------------------
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+IG_USERNAME = "dracuhikehde"
+IG_PASSWORD = "Dracu420"
 
-IG_USERNAME = "your_instagram_username"
-IG_PASSWORD = "your_instagram_password"
+INSTAGRAM_THREAD_ID = "788851167511644"   # Put your thread ID
 
-# Instagram DM Thread ID (user, group, broadcast)
-INSTAGRAM_THREAD_ID = "12345678901234567"
-
+MESSAGES_FILE = "messages.txt"
 DELAY_FILE = "delays.json"
 SESSION_FILE = "session.json"
 
+
 # -------------------------
-# INSTAGRAM LOGIN + SESSION
+# INSTAGRAM CLIENT
 # -------------------------
 
 cl = Client()
 
 
 def save_session():
-    """Save Instagram session to session.json"""
+    """Save Instagram session after login"""
     try:
         session = cl.get_session()
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
@@ -38,7 +36,7 @@ def save_session():
 
 
 def load_session():
-    """Load Instagram session if exists"""
+    """Try loading saved IG session"""
     if os.path.exists(SESSION_FILE):
         try:
             with open(SESSION_FILE, "r", encoding="utf-8") as f:
@@ -48,13 +46,12 @@ def load_session():
             print("Logged in using saved session.")
             return True
         except Exception as e:
-            print("Saved session failed:", e)
+            print("Failed to load session:", e)
             return False
     return False
 
 
 def login_instagram():
-    """Login automatically using saved session or normal login"""
     print("Logging into Instagram...")
 
     if load_session():
@@ -79,48 +76,47 @@ def load_delays():
                 return json.load(f)["delay_seconds_list"]
         except:
             pass
-    return [3, 5, 8]  # default delays
+    return [10]  # fallback
 
 
-def send_instagram_message(msg):
+def load_messages():
+    """Read auto-messages from file"""
+    if not os.path.exists(MESSAGES_FILE):
+        return []
+
+    with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    # Remove empty lines
+    return [msg for msg in lines if msg.strip()]
+
+
+def auto_send_messages():
+    """Send each message one-by-one from messages.txt"""
+    messages = load_messages()
     delays = load_delays()
-    delay = random.choice(delays)
-    print(f"Delay before sending: {delay} seconds")
 
-    time.sleep(delay)
+    print(f"Loaded {len(messages)} messages to auto-send.")
 
-    try:
-        cl.direct_send(msg, [INSTAGRAM_THREAD_ID])
-        print("Sent to Instagram:", msg)
-    except Exception as e:
-        print("Failed to send message:", e)
+    for msg in messages:
+        delay = random.choice(delays)
+        print(f"\nWaiting {delay} seconds before sending next message...")
+        time.sleep(delay)
 
+        try:
+            cl.direct_send(msg, [INSTAGRAM_THREAD_ID])
+            print(f"Sent to Instagram: {msg}")
+        except Exception as e:
+            print("Failed to send message:", e)
 
-# -------------------------
-# TELEGRAM BOT
-# -------------------------
-
-def tg_handler(update, context):
-    text = update.message.text
-    print("Telegram message received:", text)
-    send_instagram_message(text)
-
-
-def start_telegram_bot():
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, tg_handler))
-
-    print("Telegram bot is running...")
-    updater.start_polling()
-    updater.idle()
+    print("\nAll messages sent. Restart service to send again.")
+    time.sleep(999999999)  # prevent Render from restarting loop
 
 
 # -------------------------
-# RUN BOT
+# RUN
 # -------------------------
 
 if __name__ == "__main__":
     login_instagram()
-    start_telegram_bot()
+    auto_send_messages()
